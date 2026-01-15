@@ -20,7 +20,7 @@ cargo install --path .
 
 ### Requirements
 
-- [opencode](https://github.com/sst/opencode) must be running (e.g., in a tmux pane or separate terminal)
+- [opencode](https://github.com/sst/opencode) must be running with `--port` flag (e.g., `opencode --port 8080` in a tmux pane or separate terminal)
 - Helix editor
 
 ## Helix Configuration

@@ -219,50 +219,6 @@ Input:  "Explain @this"
 Output: "Explain @src/main.rs L42:C10-L50:C1"
 ```
 
-#### Helix Integration for Context
-
-```toml
-# Full context with cursor position (normal mode)
-C-o = [
-  ":new",
-  ":insert-output opencode-helix ask -f %{buffer_name} -l %{cursor_line} -c %{cursor_column} --cwd %{workspace_directory} --language %{language}",
-  ":buffer-close!",
-  ":redraw"
-]
-
-# With selection (select mode) - uses temp file
-C-S-o = [
-  ":write ~/.cache/opencode-selection.tmp",
-  ":new",
-  ":insert-output opencode-helix ask -f %{buffer_name} --selection-file ~/.cache/opencode-selection.tmp --selection-start %{selection_line_start} --selection-end %{selection_line_end} --cwd %{workspace_directory}",
-  ":buffer-close!",
-  ":redraw"
-]
-```
-Input:  "Explain @this"
-Output: "Explain @src/main.rs L42:C10-L50:C1"
-```
-
-#### Helix Integration for Context
-
-```toml
-# Full context with cursor position
-C-o = [
-  ":new",
-  ":insert-output opencode-helix ask -f %{buffer_name} -l %{cursor_line} -c %{cursor_column} --cwd %{workspace_directory}",
-  ":buffer-close!",
-  ":redraw"
-]
-
-# With selection
-C-S-o = [
-  ":new",
-  ":insert-output opencode-helix ask -f %{buffer_name} -s %{selection} --selection-start %{selection_line_start} --selection-end %{selection_line_end} --cwd %{workspace_directory}",
-  ":buffer-close!",
-  ":redraw"
-]
-```
-
 ---
 
 ## Data Flow
@@ -374,95 +330,78 @@ auto_submit = true  # Submit prompt immediately after selection
 
 ## Helix Keybinding Examples
 
-### Basic Setup (No Context)
+> **Note**: This proposal has been implemented. See README.md for the current recommended configuration.
+
+### Recommended Setup
+
+The implemented solution uses `;` as a prefix and cache files to preserve context:
 
 ```toml
-# ~/.config/helix/config.toml
-
-[keys.normal]
-# Open ask prompt (no context)
-C-o = [":new", ":insert-output opencode-helix ask", ":buffer-close!", ":redraw"]
-
-# Open selection menu
-C-S-o = [":new", ":insert-output opencode-helix select", ":buffer-close!", ":redraw"]
-```
-
-### Full Context Setup (Recommended)
-
-```toml
-# ~/.config/helix/config.toml
-
-[keys.normal]
-# Ask with cursor context
-C-o = [
-  ":new",
-  ":insert-output opencode-helix ask -f %{buffer_name} -l %{cursor_line} -c %{cursor_column} --cwd %{workspace_directory} --language %{language}",
-  ":buffer-close!",
-  ":redraw"
+# Normal mode: ;i (ask), ;s (select) - cursor context only
+[keys.normal.";"]
+i = [
+    ":sh echo '%{buffer_name}' > ~/.cache/helix/opencode_file && echo '%{cursor_line}' > ~/.cache/helix/opencode_line && echo '%{cursor_column}' > ~/.cache/helix/opencode_col && echo '%{language}' > ~/.cache/helix/opencode_lang && echo '%{workspace_directory}' > ~/.cache/helix/opencode_cwd",
+    ":new",
+    ":insert-output opencode-helix ask -f %sh{cat ~/.cache/helix/opencode_file} -l %sh{cat ~/.cache/helix/opencode_line} -c %sh{cat ~/.cache/helix/opencode_col} --cwd %sh{cat ~/.cache/helix/opencode_cwd} --language %sh{cat ~/.cache/helix/opencode_lang}",
+    ":buffer-close!",
+    ":redraw",
+]
+s = [
+    ":sh echo '%{buffer_name}' > ~/.cache/helix/opencode_file && echo '%{cursor_line}' > ~/.cache/helix/opencode_line && echo '%{cursor_column}' > ~/.cache/helix/opencode_col && echo '%{language}' > ~/.cache/helix/opencode_lang && echo '%{workspace_directory}' > ~/.cache/helix/opencode_cwd",
+    ":new",
+    ":insert-output opencode-helix select -f %sh{cat ~/.cache/helix/opencode_file} -l %sh{cat ~/.cache/helix/opencode_line} -c %sh{cat ~/.cache/helix/opencode_col} --cwd %sh{cat ~/.cache/helix/opencode_cwd} --language %sh{cat ~/.cache/helix/opencode_lang}",
+    ":buffer-close!",
+    ":redraw",
 ]
 
-# Select with cursor context
-C-S-o = [
-  ":new",
-  ":insert-output opencode-helix select -f %{buffer_name} -l %{cursor_line} -c %{cursor_column} --cwd %{workspace_directory} --language %{language}",
-  ":buffer-close!",
-  ":redraw"
+# Select mode: ;e (explain), ;r (review) - with selection via :pipe-to
+[keys.select.";"]
+e = [
+    ":sh echo '%{buffer_name}' > ~/.cache/helix/opencode_file && echo '%{selection_line_start}' > ~/.cache/helix/opencode_sel_start && echo '%{selection_line_end}' > ~/.cache/helix/opencode_sel_end && echo '%{language}' > ~/.cache/helix/opencode_lang && echo '%{workspace_directory}' > ~/.cache/helix/opencode_cwd",
+    ":pipe-to cat > ~/.cache/helix/opencode_selection.tmp",
+    ":new",
+    ":insert-output opencode-helix prompt explain -f %sh{cat ~/.cache/helix/opencode_file} --selection-file ~/.cache/helix/opencode_selection.tmp --selection-start %sh{cat ~/.cache/helix/opencode_sel_start} --selection-end %sh{cat ~/.cache/helix/opencode_sel_end} --cwd %sh{cat ~/.cache/helix/opencode_cwd} --language %sh{cat ~/.cache/helix/opencode_lang}",
+    ":buffer-close!",
+    ":redraw",
 ]
-
-[keys.select]
-# Ask with selection context (from visual/select mode)
-# Writes selection to temp file first, then invokes opencode-helix
-C-o = [
-  ":write ~/.cache/opencode-selection.tmp",
-  ":new",
-  ":insert-output opencode-helix ask -f %{buffer_name} --selection-file ~/.cache/opencode-selection.tmp --selection-start %{selection_line_start} --selection-end %{selection_line_end} --cwd %{workspace_directory} --language %{language}",
-  ":buffer-close!",
-  ":redraw"
+r = [
+    ":sh echo '%{buffer_name}' > ~/.cache/helix/opencode_file && echo '%{selection_line_start}' > ~/.cache/helix/opencode_sel_start && echo '%{selection_line_end}' > ~/.cache/helix/opencode_sel_end && echo '%{language}' > ~/.cache/helix/opencode_lang && echo '%{workspace_directory}' > ~/.cache/helix/opencode_cwd",
+    ":pipe-to cat > ~/.cache/helix/opencode_selection.tmp",
+    ":new",
+    ":insert-output opencode-helix prompt review -f %sh{cat ~/.cache/helix/opencode_file} --selection-file ~/.cache/helix/opencode_selection.tmp --selection-start %sh{cat ~/.cache/helix/opencode_sel_start} --selection-end %sh{cat ~/.cache/helix/opencode_sel_end} --cwd %sh{cat ~/.cache/helix/opencode_cwd} --language %sh{cat ~/.cache/helix/opencode_lang}",
+    ":buffer-close!",
+    ":redraw",
 ]
-
-# Select menu with selection context
-C-S-o = [
-  ":write ~/.cache/opencode-selection.tmp",
-  ":new",
-  ":insert-output opencode-helix select -f %{buffer_name} --selection-file ~/.cache/opencode-selection.tmp --selection-start %{selection_line_start} --selection-end %{selection_line_end} --cwd %{workspace_directory} --language %{language}",
-  ":buffer-close!",
-  ":redraw"
-]
-
-[keys.normal.space.a]  # Space-a menu for AI
-i = [":new", ":insert-output opencode-helix ask -f %{buffer_name} -l %{cursor_line} --cwd %{workspace_directory}", ":buffer-close!", ":redraw"]
-s = [":new", ":insert-output opencode-helix select -f %{buffer_name} -l %{cursor_line} --cwd %{workspace_directory}", ":buffer-close!", ":redraw"]
-e = [":new", ":insert-output opencode-helix prompt explain -f %{buffer_name} -l %{cursor_line} --cwd %{workspace_directory}", ":buffer-close!", ":redraw"]
-r = [":new", ":insert-output opencode-helix prompt review -f %{buffer_name} -l %{cursor_line} --cwd %{workspace_directory}", ":buffer-close!", ":redraw"]
 ```
 
 ---
 
-## Implementation Phases
+## Implementation Status
+
+All phases have been completed:
 
 ### Phase 1: Core Foundation
-- [ ] CLI argument parsing with clap
-- [ ] Server discovery (find opencode processes)
-- [ ] HTTP client for opencode API
-- [ ] Basic `prompt` command (non-interactive)
+- [x] CLI argument parsing with clap
+- [x] Server discovery (find opencode processes)
+- [x] HTTP client for opencode API
+- [x] Basic `prompt` command (non-interactive)
 
 ### Phase 2: TUI Implementation
-- [ ] Ratatui app scaffolding
-- [ ] Ask mode with input field
-- [ ] Select mode with menu
-- [ ] Keyboard navigation
+- [x] Ratatui app scaffolding
+- [x] Ask mode with input field
+- [x] Select mode with menu
+- [x] Keyboard navigation
 
 ### Phase 3: Context & Polish
-- [ ] Context placeholder expansion (@this, @buffer, @selection)
-- [ ] Selection text handling (escaping, large selections)
-- [ ] Tab completion for contexts and agents
-- [ ] Configuration file support
-- [ ] Error handling and user feedback
+- [x] Context placeholder expansion (@this, @buffer, @path, @selection, @diff)
+- [x] Selection text handling (via temp file for robustness)
+- [x] Placeholder viewer panel (toggle with `?`)
+- [x] Debug mode (`--debug` flag)
 
 ### Phase 4: Documentation
-- [ ] README with installation instructions
-- [ ] Helix configuration examples
-- [ ] Troubleshooting guide
+- [x] README with installation instructions
+- [x] Helix configuration examples
+- [x] This proposal document
 
 ---
 

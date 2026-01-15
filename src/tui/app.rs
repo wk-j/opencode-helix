@@ -14,6 +14,8 @@ use std::io::Read;
 use std::os::unix::io::AsRawFd;
 use std::time::Duration;
 
+use crate::context::Context;
+
 /// Result of running the TUI app
 #[derive(Debug)]
 pub enum AppResult {
@@ -182,20 +184,39 @@ impl App {
     }
 
     /// Run the ask (input) mode
-    pub fn run_ask(&mut self, initial: &str, context_hint: Option<&str>) -> Result<AppResult> {
+    pub fn run_ask(
+        &mut self,
+        initial: &str,
+        context_hint: Option<&str>,
+        context: Option<&Context>,
+    ) -> Result<AppResult> {
         let mut input = initial.to_string();
         let mut cursor_pos = input.len();
         // Focus: 0 = input, 1 = Send button, 2 = Cancel button
         let mut focus: u8 = 0;
+
+        // Get placeholders if context is available
+        let placeholders = context
+            .map(|ctx| ctx.list_placeholders())
+            .unwrap_or_default();
 
         loop {
             // Draw UI
             self.terminal.draw(|frame| {
                 let area = frame.area();
 
-                // Center the dialog
-                let dialog_width = area.width.min(60);
-                let dialog_height = 8; // Increased for button row
+                // Dialog size - always include space for placeholders if we have them
+                let has_placeholders = !placeholders.is_empty();
+                let dialog_width = if has_placeholders {
+                    area.width.min(80)
+                } else {
+                    area.width.min(60)
+                };
+                let dialog_height = if has_placeholders {
+                    10 + placeholders.len() as u16
+                } else {
+                    8
+                };
                 let dialog_area = Rect {
                     x: (area.width - dialog_width) / 2,
                     y: (area.height - dialog_height) / 2,
@@ -216,26 +237,21 @@ impl App {
                 frame.render_widget(block, dialog_area);
 
                 // Context hint (if any)
-                let input_area = if let Some(hint) = context_hint {
+                let mut current_y = inner.y;
+                if let Some(hint) = context_hint {
                     let hint_para =
                         Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
-                    let hint_area = Rect {
-                        x: inner.x,
-                        y: inner.y,
-                        width: inner.width,
-                        height: 1,
-                    };
-                    frame.render_widget(hint_para, hint_area);
-
-                    Rect {
-                        x: inner.x,
-                        y: inner.y + 1,
-                        width: inner.width,
-                        height: inner.height - 1,
-                    }
-                } else {
-                    inner
-                };
+                    frame.render_widget(
+                        hint_para,
+                        Rect {
+                            x: inner.x,
+                            y: current_y,
+                            width: inner.width,
+                            height: 1,
+                        },
+                    );
+                    current_y += 1;
+                }
 
                 // Input field
                 let input_style = if focus == 0 {
@@ -248,15 +264,55 @@ impl App {
                 frame.render_widget(
                     input_para,
                     Rect {
-                        x: input_area.x,
-                        y: input_area.y,
-                        width: input_area.width,
+                        x: inner.x,
+                        y: current_y,
+                        width: inner.width,
                         height: 1,
                     },
                 );
+                current_y += 2;
+
+                // Placeholders panel (always show when we have placeholders)
+                if !placeholders.is_empty() {
+                    let placeholder_title = Paragraph::new("Available placeholders:")
+                        .style(Style::default().fg(Color::Yellow));
+                    frame.render_widget(
+                        placeholder_title,
+                        Rect {
+                            x: inner.x,
+                            y: current_y,
+                            width: inner.width,
+                            height: 1,
+                        },
+                    );
+                    current_y += 1;
+
+                    for (placeholder, value) in &placeholders {
+                        // Truncate value if too long
+                        let max_value_len = (inner.width as usize).saturating_sub(15);
+                        let display_value = if value.len() > max_value_len {
+                            format!("{}...", &value[..max_value_len.saturating_sub(3)])
+                        } else {
+                            value.clone()
+                        };
+                        let line = format!("  {:<12} {}", placeholder, display_value);
+                        let para = Paragraph::new(line).style(Style::default().fg(Color::Gray));
+                        frame.render_widget(
+                            para,
+                            Rect {
+                                x: inner.x,
+                                y: current_y,
+                                width: inner.width,
+                                height: 1,
+                            },
+                        );
+                        current_y += 1;
+                    }
+                    current_y += 1;
+                }
 
                 // Buttons row
-                let button_y = input_area.y + 2;
+                let button_y = current_y;
 
                 // Send button
                 let send_style = if focus == 1 {
@@ -268,7 +324,7 @@ impl App {
                 frame.render_widget(
                     send_btn,
                     Rect {
-                        x: input_area.x,
+                        x: inner.x,
                         y: button_y,
                         width: 8,
                         height: 1,
@@ -285,7 +341,7 @@ impl App {
                 frame.render_widget(
                     cancel_btn,
                     Rect {
-                        x: input_area.x + 10,
+                        x: inner.x + 10,
                         y: button_y,
                         width: 10,
                         height: 1,
@@ -298,18 +354,23 @@ impl App {
                 frame.render_widget(
                     help_para,
                     Rect {
-                        x: input_area.x,
-                        y: input_area.y + input_area.height - 1,
-                        width: input_area.width,
+                        x: inner.x,
+                        y: inner.y + inner.height - 1,
+                        width: inner.width,
                         height: 1,
                     },
                 );
 
                 // Position cursor only when input is focused
                 if focus == 0 {
+                    let input_y = if context_hint.is_some() {
+                        inner.y + 1
+                    } else {
+                        inner.y
+                    };
                     frame.set_cursor_position(Position {
-                        x: input_area.x + 2 + cursor_pos as u16,
-                        y: input_area.y,
+                        x: inner.x + 2 + cursor_pos as u16,
+                        y: input_y,
                     });
                 }
             })?;

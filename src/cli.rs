@@ -44,6 +44,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub language: Option<String>,
 
+    /// Enable debug mode (writes debug info to /tmp/opencode-helix-debug.log)
+    #[arg(long, global = true)]
+    pub debug: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }

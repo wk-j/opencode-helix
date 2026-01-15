@@ -33,17 +33,21 @@ Add keybindings to your `~/.config/helix/config.toml`:
 
 ### Recommended Setup
 
+The keybindings use `;` as a prefix. Before using, create the cache directory:
+
+```bash
+mkdir -p ~/.cache/helix
+```
+
 ```toml
 # opencode-helix AI integration
-# Each command:
-#   1. Saves current buffer context (file, line, column, language, cwd) to cache files
-#   2. Opens a new scratch buffer (required for :insert-output to work)
-#   3. Runs opencode-helix which shows a TUI and sends prompt to opencode server
-#   4. Closes the scratch buffer and redraws the screen
+# Normal mode: ;i (ask), ;s (select menu) - cursor position context
+# Select mode: ;e (explain), ;r (review) - with selection content
+
 [keys.normal.";"]
 # ;i = Ask - Opens input prompt to type a custom question to AI
 i = [
-    ":sh mkdir -p ~/.cache/helix && echo '%{buffer_name}' > ~/.cache/helix/opencode_file && echo '%{cursor_line}' > ~/.cache/helix/opencode_line && echo '%{cursor_column}' > ~/.cache/helix/opencode_col && echo '%{language}' > ~/.cache/helix/opencode_lang && echo '%{workspace_directory}' > ~/.cache/helix/opencode_cwd",
+    ":sh echo '%{buffer_name}' > ~/.cache/helix/opencode_file && echo '%{cursor_line}' > ~/.cache/helix/opencode_line && echo '%{cursor_column}' > ~/.cache/helix/opencode_col && echo '%{language}' > ~/.cache/helix/opencode_lang && echo '%{workspace_directory}' > ~/.cache/helix/opencode_cwd",
     ":new",
     ":insert-output opencode-helix ask -f %sh{cat ~/.cache/helix/opencode_file} -l %sh{cat ~/.cache/helix/opencode_line} -c %sh{cat ~/.cache/helix/opencode_col} --cwd %sh{cat ~/.cache/helix/opencode_cwd} --language %sh{cat ~/.cache/helix/opencode_lang}",
     ":buffer-close!",
@@ -51,57 +55,18 @@ i = [
 ]
 # ;s = Select - Opens menu to choose from predefined prompts, commands, and agents
 s = [
-    ":sh mkdir -p ~/.cache/helix && echo '%{buffer_name}' > ~/.cache/helix/opencode_file && echo '%{cursor_line}' > ~/.cache/helix/opencode_line && echo '%{cursor_column}' > ~/.cache/helix/opencode_col && echo '%{language}' > ~/.cache/helix/opencode_lang && echo '%{workspace_directory}' > ~/.cache/helix/opencode_cwd",
+    ":sh echo '%{buffer_name}' > ~/.cache/helix/opencode_file && echo '%{cursor_line}' > ~/.cache/helix/opencode_line && echo '%{cursor_column}' > ~/.cache/helix/opencode_col && echo '%{language}' > ~/.cache/helix/opencode_lang && echo '%{workspace_directory}' > ~/.cache/helix/opencode_cwd",
     ":new",
     ":insert-output opencode-helix select -f %sh{cat ~/.cache/helix/opencode_file} -l %sh{cat ~/.cache/helix/opencode_line} -c %sh{cat ~/.cache/helix/opencode_col} --cwd %sh{cat ~/.cache/helix/opencode_cwd} --language %sh{cat ~/.cache/helix/opencode_lang}",
     ":buffer-close!",
     ":redraw",
 ]
-# ;e = Explain - Sends "explain this code" prompt with current file context
-e = [
-    ":sh mkdir -p ~/.cache/helix && echo '%{buffer_name}' > ~/.cache/helix/opencode_file && echo '%{cursor_line}' > ~/.cache/helix/opencode_line && echo '%{cursor_column}' > ~/.cache/helix/opencode_col && echo '%{language}' > ~/.cache/helix/opencode_lang && echo '%{workspace_directory}' > ~/.cache/helix/opencode_cwd",
-    ":new",
-    ":insert-output opencode-helix prompt explain -f %sh{cat ~/.cache/helix/opencode_file} -l %sh{cat ~/.cache/helix/opencode_line} -c %sh{cat ~/.cache/helix/opencode_col} --cwd %sh{cat ~/.cache/helix/opencode_cwd} --language %sh{cat ~/.cache/helix/opencode_lang}",
-    ":buffer-close!",
-    ":redraw",
-]
-# ;r = Review - Sends "review this code" prompt with current file context
-r = [
-    ":sh mkdir -p ~/.cache/helix && echo '%{buffer_name}' > ~/.cache/helix/opencode_file && echo '%{cursor_line}' > ~/.cache/helix/opencode_line && echo '%{cursor_column}' > ~/.cache/helix/opencode_col && echo '%{language}' > ~/.cache/helix/opencode_lang && echo '%{workspace_directory}' > ~/.cache/helix/opencode_cwd",
-    ":new",
-    ":insert-output opencode-helix prompt review -f %sh{cat ~/.cache/helix/opencode_file} -l %sh{cat ~/.cache/helix/opencode_line} -c %sh{cat ~/.cache/helix/opencode_col} --cwd %sh{cat ~/.cache/helix/opencode_cwd} --language %sh{cat ~/.cache/helix/opencode_lang}",
-    ":buffer-close!",
-    ":redraw",
-]
-```
 
-### With Selection Support
-
-To use `@selection` in prompts, you must first select text in Helix (using `x` to select lines, `v` for visual mode, etc.), then trigger the keybinding from **select mode**.
-
-```toml
+# Select mode: uses :pipe-to for robust selection capture (handles quotes, newlines, special chars)
 [keys.select.";"]
-# ;i = Ask with selection context (from visual/select mode)
-i = [
-    ":sh mkdir -p ~/.cache/helix && echo '%{buffer_name}' > ~/.cache/helix/opencode_file && echo '%{selection_line_start}' > ~/.cache/helix/opencode_sel_start && echo '%{selection_line_end}' > ~/.cache/helix/opencode_sel_end && echo '%{language}' > ~/.cache/helix/opencode_lang && echo '%{workspace_directory}' > ~/.cache/helix/opencode_cwd",
-    ":pipe-to cat > ~/.cache/helix/opencode_selection.tmp",
-    ":new",
-    ":insert-output opencode-helix ask -f %sh{cat ~/.cache/helix/opencode_file} --selection-file ~/.cache/helix/opencode_selection.tmp --selection-start %sh{cat ~/.cache/helix/opencode_sel_start} --selection-end %sh{cat ~/.cache/helix/opencode_sel_end} --cwd %sh{cat ~/.cache/helix/opencode_cwd} --language %sh{cat ~/.cache/helix/opencode_lang}",
-    ":buffer-close!",
-    ":redraw",
-]
-# ;s = Select with selection context (from visual/select mode)
-s = [
-    ":sh mkdir -p ~/.cache/helix && echo '%{buffer_name}' > ~/.cache/helix/opencode_file && echo '%{selection_line_start}' > ~/.cache/helix/opencode_sel_start && echo '%{selection_line_end}' > ~/.cache/helix/opencode_sel_end && echo '%{language}' > ~/.cache/helix/opencode_lang && echo '%{workspace_directory}' > ~/.cache/helix/opencode_cwd",
-    ":pipe-to cat > ~/.cache/helix/opencode_selection.tmp",
-    ":new",
-    ":insert-output opencode-helix select -f %sh{cat ~/.cache/helix/opencode_file} --selection-file ~/.cache/helix/opencode_selection.tmp --selection-start %sh{cat ~/.cache/helix/opencode_sel_start} --selection-end %sh{cat ~/.cache/helix/opencode_sel_end} --cwd %sh{cat ~/.cache/helix/opencode_cwd} --language %sh{cat ~/.cache/helix/opencode_lang}",
-    ":buffer-close!",
-    ":redraw",
-]
 # ;e = Explain selection
 e = [
-    ":sh mkdir -p ~/.cache/helix && echo '%{buffer_name}' > ~/.cache/helix/opencode_file && echo '%{selection_line_start}' > ~/.cache/helix/opencode_sel_start && echo '%{selection_line_end}' > ~/.cache/helix/opencode_sel_end && echo '%{language}' > ~/.cache/helix/opencode_lang && echo '%{workspace_directory}' > ~/.cache/helix/opencode_cwd",
+    ":sh echo '%{buffer_name}' > ~/.cache/helix/opencode_file && echo '%{selection_line_start}' > ~/.cache/helix/opencode_sel_start && echo '%{selection_line_end}' > ~/.cache/helix/opencode_sel_end && echo '%{language}' > ~/.cache/helix/opencode_lang && echo '%{workspace_directory}' > ~/.cache/helix/opencode_cwd",
     ":pipe-to cat > ~/.cache/helix/opencode_selection.tmp",
     ":new",
     ":insert-output opencode-helix prompt explain -f %sh{cat ~/.cache/helix/opencode_file} --selection-file ~/.cache/helix/opencode_selection.tmp --selection-start %sh{cat ~/.cache/helix/opencode_sel_start} --selection-end %sh{cat ~/.cache/helix/opencode_sel_end} --cwd %sh{cat ~/.cache/helix/opencode_cwd} --language %sh{cat ~/.cache/helix/opencode_lang}",
@@ -110,7 +75,7 @@ e = [
 ]
 # ;r = Review selection
 r = [
-    ":sh mkdir -p ~/.cache/helix && echo '%{buffer_name}' > ~/.cache/helix/opencode_file && echo '%{selection_line_start}' > ~/.cache/helix/opencode_sel_start && echo '%{selection_line_end}' > ~/.cache/helix/opencode_sel_end && echo '%{language}' > ~/.cache/helix/opencode_lang && echo '%{workspace_directory}' > ~/.cache/helix/opencode_cwd",
+    ":sh echo '%{buffer_name}' > ~/.cache/helix/opencode_file && echo '%{selection_line_start}' > ~/.cache/helix/opencode_sel_start && echo '%{selection_line_end}' > ~/.cache/helix/opencode_sel_end && echo '%{language}' > ~/.cache/helix/opencode_lang && echo '%{workspace_directory}' > ~/.cache/helix/opencode_cwd",
     ":pipe-to cat > ~/.cache/helix/opencode_selection.tmp",
     ":new",
     ":insert-output opencode-helix prompt review -f %sh{cat ~/.cache/helix/opencode_file} --selection-file ~/.cache/helix/opencode_selection.tmp --selection-start %sh{cat ~/.cache/helix/opencode_sel_start} --selection-end %sh{cat ~/.cache/helix/opencode_sel_end} --cwd %sh{cat ~/.cache/helix/opencode_cwd} --language %sh{cat ~/.cache/helix/opencode_lang}",
@@ -118,6 +83,17 @@ r = [
     ":redraw",
 ]
 ```
+
+### Keybinding Summary
+
+| Mode | Key | Action |
+|------|-----|--------|
+| Normal | `;i` | Ask - open input prompt |
+| Normal | `;s` | Select - open menu |
+| Select | `;e` | Explain selected code |
+| Select | `;r` | Review selected code |
+
+To use selection-based commands, first select text with `x` (line), `v` (char), or `V` (extend), then press the keybinding.
 
 ## Usage
 
@@ -147,9 +123,12 @@ In prompts, use these placeholders to include editor context:
 | Placeholder | Description |
 |-------------|-------------|
 | `@this` | Current file + cursor/selection position |
-| `@buffer` | Current file reference |
+| `@buffer` | Current file reference (relative path) |
+| `@path` | Absolute file path |
 | `@selection` | Selection with content |
 | `@diff` | Git diff output |
+
+**Tip:** Press `?` in the ask prompt to toggle a panel showing all placeholders and their current values.
 
 ### Predefined Prompts
 

@@ -11,6 +11,9 @@ pub struct Context {
     /// Current file path (relative)
     pub file: Option<String>,
 
+    /// Current file path (absolute)
+    pub file_absolute: Option<String>,
+
     /// Cursor line (1-based)
     pub line: Option<u32>,
 
@@ -40,8 +43,24 @@ impl Context {
             content
         });
 
+        // Get absolute path from relative file path
+        let file_absolute = cli.file.as_ref().and_then(|p| {
+            if p.is_absolute() {
+                Some(p.display().to_string())
+            } else {
+                // Try to make it absolute using cwd or current dir
+                let base = cli
+                    .cwd
+                    .as_ref()
+                    .cloned()
+                    .or_else(|| std::env::current_dir().ok());
+                base.map(|b| b.join(p).display().to_string())
+            }
+        });
+
         Self {
             file: cli.file.as_ref().map(|p| p.display().to_string()),
+            file_absolute,
             line: cli.line,
             column: cli.column,
             selection,
@@ -135,6 +154,11 @@ impl Context {
             result = result.replace("@buffer", &buffer);
         }
 
+        // Replace @path (absolute file path)
+        if let Some(ref path) = self.file_absolute {
+            result = result.replace("@path", path);
+        }
+
         // Replace @selection
         if let Some(selection) = self.format_selection() {
             result = result.replace("@selection", &selection);
@@ -158,6 +182,57 @@ impl Context {
     /// Check if context has selection
     pub fn has_selection(&self) -> bool {
         self.selection.is_some() || self.selection_start.is_some()
+    }
+
+    /// Get all placeholders with their current values
+    /// Returns a list of (placeholder, value) pairs
+    pub fn list_placeholders(&self) -> Vec<(&'static str, String)> {
+        let mut placeholders = Vec::new();
+
+        // @this - current file + cursor/selection position
+        let this_value = self
+            .format_this()
+            .unwrap_or_else(|| "(no file context)".to_string());
+        placeholders.push(("@this", this_value));
+
+        // @buffer - current file reference
+        let buffer_value = self
+            .format_buffer()
+            .unwrap_or_else(|| "(no file context)".to_string());
+        placeholders.push(("@buffer", buffer_value));
+
+        // @path - absolute file path
+        let path_value = self
+            .file_absolute
+            .clone()
+            .unwrap_or_else(|| "(no file context)".to_string());
+        placeholders.push(("@path", path_value));
+
+        // @selection - selection with content
+        let selection_value = if self.selection.is_some() {
+            let sel = self.selection.as_ref().unwrap();
+            let preview = if sel.len() > 50 {
+                format!("{}...", &sel[..50])
+            } else {
+                sel.clone()
+            };
+            let lines = sel.lines().count();
+            format!("{} lines: {}", lines, preview.replace('\n', "\\n"))
+        } else {
+            "(no selection)".to_string()
+        };
+        placeholders.push(("@selection", selection_value));
+
+        // @diff - git diff output
+        let diff_value = if let Some(diff) = self.format_diff() {
+            let lines = diff.lines().count();
+            format!("{} lines of changes", lines)
+        } else {
+            "(no git diff)".to_string()
+        };
+        placeholders.push(("@diff", diff_value));
+
+        placeholders
     }
 }
 

@@ -81,7 +81,7 @@ async fn run_ask(
     debug: bool,
 ) -> Result<()> {
     debug_log(debug, "run_ask: starting");
-    let mut app = App::new()?;
+    let mut app = App::new(debug)?;
 
     // Build context hint
     let context_hint = ctx.format_this();
@@ -143,7 +143,7 @@ async fn run_select(client: &server::Client, ctx: &EditorContext, debug: bool) -
     // Add agents
     items.extend(config::agents_to_select_items(&agents));
 
-    let mut app = App::new()?;
+    let mut app = App::new(debug)?;
     let result = app.run_select(&items)?;
     debug_log(debug, &format!("run_select: TUI result = {:?}", result));
 

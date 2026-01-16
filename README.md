@@ -154,6 +154,20 @@ In prompts, use these placeholders to include editor context:
 
 The opencode TUI (running in another terminal/tmux pane) will show the response.
 
+### TUI Navigation
+
+| Key | Action |
+|-----|--------|
+| `j` / `↓` | Move selection down |
+| `k` / `↑` | Move selection up |
+| `Enter` | Select / Submit |
+| `Esc` | Cancel |
+| `Tab` | Navigate between elements (Ask mode) |
+| `/` + typing | Filter items (Select mode) |
+| `Backspace` | Delete filter character |
+
+> **Note**: `Ctrl+N`/`Ctrl+P` work when running standalone but are intercepted by Helix when running via keybindings. Use `j`/`k` instead.
+
 ## Architecture
 
 ```

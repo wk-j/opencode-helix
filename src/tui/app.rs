@@ -7,7 +7,7 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 use std::fs::File;
 use std::io::Read;
@@ -15,6 +15,23 @@ use std::os::unix::io::AsRawFd;
 use std::time::Duration;
 
 use crate::context::Context;
+
+const DEBUG_LOG_PATH: &str = "/tmp/opencode-helix-debug.log";
+
+/// Write debug info to log file if debug mode is enabled
+fn debug_log(debug: bool, msg: &str) {
+    if debug {
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(DEBUG_LOG_PATH)
+        {
+            let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
+            let _ = writeln!(file, "[{}] {}", timestamp, msg);
+        }
+    }
+}
 
 /// Result of running the TUI app
 #[derive(Debug)]
@@ -31,12 +48,14 @@ pub struct App {
     terminal: Terminal<CrosstermBackend<File>>,
     /// TTY file for reading input
     tty_reader: File,
+    /// Debug mode
+    debug: bool,
 }
 
 impl App {
     /// Create a new TUI application
     /// Uses /dev/tty directly to support running via Helix's :insert-output
-    pub fn new() -> Result<Self> {
+    pub fn new(debug: bool) -> Result<Self> {
         // Open /dev/tty directly - this works even when stdout is piped
         let tty_write = File::options().read(true).write(true).open("/dev/tty")?;
         let tty_reader = File::options().read(true).open("/dev/tty")?;
@@ -59,6 +78,7 @@ impl App {
         Ok(Self {
             terminal,
             tty_reader,
+            debug,
         })
     }
 
@@ -102,6 +122,9 @@ impl App {
 
         let first_byte = buf[0];
 
+        // Debug log raw bytes
+        debug_log(self.debug, &format!("Key byte: 0x{:02x}", first_byte));
+
         // If it's an escape byte, check if more bytes follow (escape sequence)
         if first_byte == 0x1b {
             // Poll briefly to see if more bytes are coming (escape sequence)
@@ -120,6 +143,10 @@ impl App {
                     // Combine escape + sequence bytes
                     let mut full_seq = vec![0x1b];
                     full_seq.extend_from_slice(&seq_buf[..seq_n]);
+
+                    // Debug log escape sequence
+                    debug_log(self.debug, &format!("Escape seq: {:02x?}", full_seq));
+
                     return Ok(self.parse_key(&full_seq));
                 }
             }
@@ -150,6 +177,15 @@ impl App {
             [0x03] => KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
             // Ctrl+D
             [0x04] => KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            // Explicit Ctrl+N and Ctrl+P
+            [0x0e] => KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            [0x10] => KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            // Generic Control characters (Ctrl+A to Ctrl+Z)
+            // 0x01 (A) to 0x1A (Z), excluding those handled above
+            [c] if *c >= 0x01 && *c <= 0x1A => {
+                let char_code = c + 0x60; // 1 -> 'a'
+                KeyEvent::new(KeyCode::Char(char_code as char), KeyModifiers::CONTROL)
+            }
             // Arrow keys and other escape sequences
             [0x1b, 0x5b, rest @ ..] => match rest {
                 [0x41] => KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
@@ -163,6 +199,10 @@ impl App {
                 // Any other escape sequence - treat as Escape key
                 _ => KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
             },
+            // Alt + Char
+            [0x1b, c] if *c >= 0x20 && *c < 0x7f => {
+                KeyEvent::new(KeyCode::Char(*c as char), KeyModifiers::ALT)
+            }
             // Any other escape sequence - treat as Escape key
             [0x1b, ..] => KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
             // Regular ASCII character
@@ -230,7 +270,9 @@ impl App {
                 // Dialog box
                 let block = Block::default()
                     .title(" opencode ")
+                    .title_style(Style::default().add_modifier(Modifier::BOLD))
                     .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(Color::Cyan));
 
                 let inner = block.inner(dialog_area);
@@ -244,9 +286,9 @@ impl App {
                     frame.render_widget(
                         hint_para,
                         Rect {
-                            x: inner.x,
+                            x: inner.x + 1, // Padding
                             y: current_y,
-                            width: inner.width,
+                            width: inner.width.saturating_sub(2),
                             height: 1,
                         },
                     );
@@ -259,14 +301,23 @@ impl App {
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
-                let display_input = format!("> {}", input);
-                let input_para = Paragraph::new(display_input.as_str()).style(input_style);
+
+                let prompt = Span::styled(
+                    "> ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                );
+                let input_text = Span::styled(&input, input_style);
+                let display_input = Line::from(vec![prompt, input_text]);
+
+                let input_para = Paragraph::new(display_input);
                 frame.render_widget(
                     input_para,
                     Rect {
-                        x: inner.x,
+                        x: inner.x + 1, // Padding
                         y: current_y,
-                        width: inner.width,
+                        width: inner.width.saturating_sub(2),
                         height: 1,
                     },
                 );
@@ -274,14 +325,17 @@ impl App {
 
                 // Placeholders panel (always show when we have placeholders)
                 if !placeholders.is_empty() {
-                    let placeholder_title = Paragraph::new("Available placeholders:")
-                        .style(Style::default().fg(Color::Yellow));
+                    let placeholder_title = Paragraph::new("Available placeholders:").style(
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    );
                     frame.render_widget(
                         placeholder_title,
                         Rect {
-                            x: inner.x,
+                            x: inner.x + 1,
                             y: current_y,
-                            width: inner.width,
+                            width: inner.width.saturating_sub(2),
                             height: 1,
                         },
                     );
@@ -289,20 +343,28 @@ impl App {
 
                     for (placeholder, value) in &placeholders {
                         // Truncate value if too long
-                        let max_value_len = (inner.width as usize).saturating_sub(15);
+                        let max_value_len = (inner.width as usize).saturating_sub(20);
                         let display_value = if value.len() > max_value_len {
                             format!("{}...", &value[..max_value_len.saturating_sub(3)])
                         } else {
                             value.clone()
                         };
-                        let line = format!("  {:<12} {}", placeholder, display_value);
-                        let para = Paragraph::new(line).style(Style::default().fg(Color::Gray));
+
+                        let line = Line::from(vec![
+                            Span::styled(
+                                format!("  {:<12}", placeholder),
+                                Style::default().fg(Color::Cyan),
+                            ),
+                            Span::styled(display_value, Style::default().fg(Color::DarkGray)),
+                        ]);
+
+                        let para = Paragraph::new(line);
                         frame.render_widget(
                             para,
                             Rect {
-                                x: inner.x,
+                                x: inner.x + 1,
                                 y: current_y,
-                                width: inner.width,
+                                width: inner.width.saturating_sub(2),
                                 height: 1,
                             },
                         );
@@ -316,15 +378,20 @@ impl App {
 
                 // Send button
                 let send_style = if focus == 1 {
-                    Style::default().fg(Color::Black).bg(Color::Cyan)
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::Cyan)
+                    Style::default().fg(Color::DarkGray)
                 };
-                let send_btn = Paragraph::new(" [Send] ").style(send_style);
+                let send_btn = Paragraph::new(" Send ")
+                    .style(send_style)
+                    .alignment(Alignment::Center);
                 frame.render_widget(
                     send_btn,
                     Rect {
-                        x: inner.x,
+                        x: inner.x + 1,
                         y: button_y,
                         width: 8,
                         height: 1,
@@ -333,15 +400,20 @@ impl App {
 
                 // Cancel button
                 let cancel_style = if focus == 2 {
-                    Style::default().fg(Color::Black).bg(Color::Red)
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Red)
+                        .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::Red)
+                    Style::default().fg(Color::DarkGray)
                 };
-                let cancel_btn = Paragraph::new(" [Cancel] ").style(cancel_style);
+                let cancel_btn = Paragraph::new(" Cancel ")
+                    .style(cancel_style)
+                    .alignment(Alignment::Center);
                 frame.render_widget(
                     cancel_btn,
                     Rect {
-                        x: inner.x + 10,
+                        x: inner.x + 11,
                         y: button_y,
                         width: 10,
                         height: 1,
@@ -349,8 +421,10 @@ impl App {
                 );
 
                 // Help text
-                let help = "[Tab] Navigate  [Enter] Select  [Esc] Cancel";
-                let help_para = Paragraph::new(help).style(Style::default().fg(Color::DarkGray));
+                let help = " [Tab] Navigate  [Enter] Select  [Esc] Cancel ";
+                let help_para = Paragraph::new(help)
+                    .style(Style::default().fg(Color::DarkGray))
+                    .alignment(Alignment::Center);
                 frame.render_widget(
                     help_para,
                     Rect {
@@ -414,7 +488,12 @@ impl App {
                         return Ok(AppResult::Cancel);
                     }
                     // Only handle text input when input field is focused
-                    KeyCode::Char(c) if focus == 0 => {
+                    KeyCode::Char(c)
+                        if focus == 0
+                            && !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
                         input.insert(cursor_pos, c);
                         cursor_pos += 1;
                     }
@@ -510,31 +589,40 @@ impl App {
                 // Dialog box
                 let block = Block::default()
                     .title(" opencode - Select ")
+                    .title_style(Style::default().add_modifier(Modifier::BOLD))
                     .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(Color::Cyan));
 
                 let inner = block.inner(dialog_area);
                 frame.render_widget(block, dialog_area);
 
                 // Filter input
-                let filter_display = format!("/ {}", filter);
-                let filter_para = Paragraph::new(filter_display.as_str())
-                    .style(Style::default().fg(Color::Yellow));
+                let filter_prompt = Span::styled(
+                    "/ ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                );
+                let filter_text = Span::styled(&filter, Style::default().fg(Color::White));
+                let filter_line = Line::from(vec![filter_prompt, filter_text]);
+
+                let filter_para = Paragraph::new(filter_line);
                 frame.render_widget(
                     filter_para,
                     Rect {
-                        x: inner.x,
+                        x: inner.x + 1,
                         y: inner.y,
-                        width: inner.width,
+                        width: inner.width.saturating_sub(2),
                         height: 1,
                     },
                 );
 
                 // Items
                 let items_area = Rect {
-                    x: inner.x,
+                    x: inner.x + 1,
                     y: inner.y + 2,
-                    width: inner.width,
+                    width: inner.width.saturating_sub(2),
                     height: inner.height.saturating_sub(4),
                 };
 
@@ -544,7 +632,10 @@ impl App {
                     }
 
                     let style = if i == selected {
-                        Style::default().fg(Color::Black).bg(Color::Cyan)
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Color::White)
                     };
@@ -565,8 +656,10 @@ impl App {
                 }
 
                 // Help text
-                let help = "[↑↓] Navigate  [Enter] Select  [Esc] Cancel  [/] Filter";
-                let help_para = Paragraph::new(help).style(Style::default().fg(Color::DarkGray));
+                let help = " [j/k] Navigate  [Enter] Select  [Esc] Cancel  [/] Filter ";
+                let help_para = Paragraph::new(help)
+                    .style(Style::default().fg(Color::DarkGray))
+                    .alignment(Alignment::Center);
                 frame.render_widget(
                     help_para,
                     Rect {
@@ -597,12 +690,26 @@ impl App {
                             selected -= 1;
                         }
                     }
+                    KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if selected > 0 {
+                            selected -= 1;
+                        }
+                    }
                     KeyCode::Down | KeyCode::Char('j') => {
                         if selected < filtered.len().saturating_sub(1) {
                             selected += 1;
                         }
                     }
-                    KeyCode::Char(c) => {
+                    KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if selected < filtered.len().saturating_sub(1) {
+                            selected += 1;
+                        }
+                    }
+                    KeyCode::Char(c)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
                         filter.push(c);
                     }
                     KeyCode::Backspace => {

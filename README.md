@@ -1,6 +1,6 @@
-# opencode-helix
+# OpenCode Helix
 
-External TUI for integrating [opencode](https://github.com/sst/opencode) AI assistant with the [Helix](https://helix-editor.com/) editor.
+External TUI for integrating [OpenCode](https://github.com/sst/opencode) AI assistant with the [Helix](https://helix-editor.com/) editor.
 
 ## Features
 

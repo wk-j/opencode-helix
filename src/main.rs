@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use cli::{Cli, Command};
 use context::Context as EditorContext;
 use tui::app::{App, AppResult, SelectItem};
+use tui::theme::ThemeKind;
 
 const DEBUG_LOG_PATH: &str = "/tmp/opencode-helix-debug.log";
 
@@ -34,6 +35,8 @@ async fn main() -> Result<()> {
     let debug = cli.debug;
     let cwd = cli.working_directory();
     let ctx = EditorContext::from_cli(&cli);
+    let theme = ThemeKind::from_str(&cli.theme);
+    let animations = !cli.no_anim;
 
     if debug {
         // Clear previous debug log
@@ -41,6 +44,8 @@ async fn main() -> Result<()> {
         debug_log(debug, &format!("CLI args: {:?}", cli));
         debug_log(debug, &format!("Context: {:?}", ctx));
         debug_log(debug, &format!("CWD: {:?}", cwd));
+        debug_log(debug, &format!("Theme: {:?}", theme));
+        debug_log(debug, &format!("Animations: {}", animations));
     }
 
     // Discover the opencode server
@@ -57,10 +62,10 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Ask { initial } => {
-            run_ask(&client, &ctx, &initial, debug).await?;
+            run_ask(&client, &ctx, &initial, debug, theme, animations).await?;
         }
         Command::Select => {
-            run_select(&client, &ctx, debug).await?;
+            run_select(&client, &ctx, debug, theme, animations).await?;
         }
         Command::Prompt { text, submit } => {
             run_prompt(&client, &ctx, &text, submit, debug).await?;
@@ -79,15 +84,17 @@ async fn run_ask(
     ctx: &EditorContext,
     initial: &str,
     debug: bool,
+    theme: ThemeKind,
+    animations: bool,
 ) -> Result<()> {
     debug_log(debug, "run_ask: starting");
-    let mut app = App::new(debug)?;
+    let mut app = App::with_theme(debug, theme)?;
 
     // Build context hint
     let context_hint = ctx.format_this();
 
     // Run the TUI with context for placeholder display
-    let result = app.run_ask(initial, context_hint.as_deref(), Some(ctx))?;
+    let result = app.run_ask(initial, context_hint.as_deref(), Some(ctx), animations)?;
     debug_log(debug, &format!("run_ask: TUI result = {:?}", result));
 
     // Clean up terminal before any async operations
@@ -116,7 +123,13 @@ async fn run_ask(
 }
 
 /// Run the select (menu) mode
-async fn run_select(client: &server::Client, ctx: &EditorContext, debug: bool) -> Result<()> {
+async fn run_select(
+    client: &server::Client,
+    ctx: &EditorContext,
+    debug: bool,
+    theme: ThemeKind,
+    animations: bool,
+) -> Result<()> {
     debug_log(debug, "run_select: starting");
 
     // Fetch agents and commands from server
@@ -143,8 +156,8 @@ async fn run_select(client: &server::Client, ctx: &EditorContext, debug: bool) -
     // Add agents
     items.extend(config::agents_to_select_items(&agents));
 
-    let mut app = App::new(debug)?;
-    let result = app.run_select(&items)?;
+    let mut app = App::with_theme(debug, theme)?;
+    let result = app.run_select(&items, animations)?;
     debug_log(debug, &format!("run_select: TUI result = {:?}", result));
 
     // Clean up terminal

@@ -48,6 +48,14 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub debug: bool,
 
+    /// UI theme: minimal, hacker (default), matrix, crt
+    #[arg(long, global = true, default_value = "hacker")]
+    pub theme: String,
+
+    /// Disable animations (blinking cursor, typing effect, scanline)
+    #[arg(long, global = true)]
+    pub no_anim: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }

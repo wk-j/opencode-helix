@@ -7,7 +7,7 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 use std::fs::File;
 use std::io::Read;
@@ -15,6 +15,8 @@ use std::os::unix::io::AsRawFd;
 use std::time::Duration;
 
 use crate::context::Context;
+use crate::tui::effects::{BlinkingCursor, Scanline, TypewriterText};
+use crate::tui::theme::{Theme, ThemeKind};
 
 const DEBUG_LOG_PATH: &str = "/tmp/opencode-helix-debug.log";
 
@@ -50,12 +52,19 @@ pub struct App {
     tty_reader: File,
     /// Debug mode
     debug: bool,
+    /// Visual theme
+    theme: Theme,
 }
 
 impl App {
     /// Create a new TUI application
     /// Uses /dev/tty directly to support running via Helix's :insert-output
     pub fn new(debug: bool) -> Result<Self> {
+        Self::with_theme(debug, ThemeKind::default())
+    }
+
+    /// Create a new TUI application with a specific theme
+    pub fn with_theme(debug: bool, theme_kind: ThemeKind) -> Result<Self> {
         // Open /dev/tty directly - this works even when stdout is piped
         let tty_write = File::options().read(true).write(true).open("/dev/tty")?;
         let tty_reader = File::options().read(true).open("/dev/tty")?;
@@ -79,6 +88,7 @@ impl App {
             terminal,
             tty_reader,
             debug,
+            theme: theme_kind.config(),
         })
     }
 
@@ -229,6 +239,7 @@ impl App {
         initial: &str,
         context_hint: Option<&str>,
         context: Option<&Context>,
+        animations: bool,
     ) -> Result<AppResult> {
         let mut input = initial.to_string();
         let mut cursor_pos = input.len();
@@ -240,10 +251,31 @@ impl App {
             .map(|ctx| ctx.list_placeholders())
             .unwrap_or_default();
 
+        // Clone theme for use in closure
+        let theme = self.theme.clone();
+
+        // Initialize effects
+        let mut cursor = BlinkingCursor::new();
+        let mut scanline = Scanline::new(20, 80);
+        scanline.set_enabled(animations);
+        let mut help_text = if animations {
+            TypewriterText::new("[Tab] Navigate  [Enter] Execute  [Esc] Abort", 60)
+        } else {
+            TypewriterText::instant("[Tab] Navigate  [Enter] Execute  [Esc] Abort")
+        };
+
         loop {
+            // Update effects
+            if animations {
+                cursor.tick();
+                scanline.tick();
+                help_text.tick();
+            }
+
             // Draw UI
             self.terminal.draw(|frame| {
                 let area = frame.area();
+                scanline.set_height(area.height);
 
                 // Dialog size - always include space for placeholders if we have them
                 let has_placeholders = !placeholders.is_empty();
@@ -267,22 +299,49 @@ impl App {
                 // Clear background
                 frame.render_widget(Clear, dialog_area);
 
-                // Dialog box
+                // Dialog box with themed styling
                 let block = Block::default()
-                    .title(" opencode ")
-                    .title_style(Style::default().add_modifier(Modifier::BOLD))
+                    .title(theme.title.as_str())
+                    .title_style(
+                        Style::default()
+                            .fg(theme.primary)
+                            .add_modifier(Modifier::BOLD),
+                    )
                     .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::Cyan));
+                    .border_type(theme.border_type())
+                    .border_style(Style::default().fg(theme.primary));
 
                 let inner = block.inner(dialog_area);
                 frame.render_widget(block, dialog_area);
 
+                // Scanline effect - render a subtle bright line
+                if scanline
+                    .is_scanline_row(dialog_area.y + (scanline.position() % dialog_area.height))
+                {
+                    let scanline_y = dialog_area.y + (scanline.position() % dialog_area.height);
+                    if scanline_y >= dialog_area.y
+                        && scanline_y < dialog_area.y + dialog_area.height
+                    {
+                        // Render scanline as a dim horizontal line overlay
+                        let scanline_widget = Paragraph::new("").style(
+                            Style::default().bg(Color::Rgb(0, 40, 0)), // Very subtle green tint
+                        );
+                        frame.render_widget(
+                            scanline_widget,
+                            Rect {
+                                x: dialog_area.x,
+                                y: scanline_y,
+                                width: dialog_area.width,
+                                height: 1,
+                            },
+                        );
+                    }
+                }
+
                 // Context hint (if any)
                 let mut current_y = inner.y;
                 if let Some(hint) = context_hint {
-                    let hint_para =
-                        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
+                    let hint_para = Paragraph::new(hint).style(Style::default().fg(theme.dim));
                     frame.render_widget(
                         hint_para,
                         Rect {
@@ -297,19 +356,22 @@ impl App {
 
                 // Input field
                 let input_style = if focus == 0 {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(theme.input)
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(theme.dim)
                 };
 
                 let prompt = Span::styled(
-                    "> ",
+                    theme.prompt.as_str(),
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(theme.primary)
                         .add_modifier(Modifier::BOLD),
                 );
                 let input_text = Span::styled(&input, input_style);
-                let display_input = Line::from(vec![prompt, input_text]);
+                // Add blinking cursor character when focused
+                let cursor_char = if focus == 0 { cursor.char() } else { "" };
+                let cursor_span = Span::styled(cursor_char, Style::default().fg(theme.primary));
+                let display_input = Line::from(vec![prompt, input_text, cursor_span]);
 
                 let input_para = Paragraph::new(display_input);
                 frame.render_widget(
@@ -325,13 +387,14 @@ impl App {
 
                 // Placeholders panel (always show when we have placeholders)
                 if !placeholders.is_empty() {
-                    let placeholder_title = Paragraph::new("Available placeholders:").style(
+                    // Simple section header
+                    let title_para = Paragraph::new("Placeholders:").style(
                         Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
+                            .fg(theme.dim)
+                            .add_modifier(Modifier::ITALIC),
                     );
                     frame.render_widget(
-                        placeholder_title,
+                        title_para,
                         Rect {
                             x: inner.x + 1,
                             y: current_y,
@@ -353,9 +416,9 @@ impl App {
                         let line = Line::from(vec![
                             Span::styled(
                                 format!("  {:<12}", placeholder),
-                                Style::default().fg(Color::Cyan),
+                                Style::default().fg(theme.secondary),
                             ),
-                            Span::styled(display_value, Style::default().fg(Color::DarkGray)),
+                            Span::styled(display_value, Style::default().fg(theme.dim)),
                         ]);
 
                         let para = Paragraph::new(line);
@@ -376,16 +439,16 @@ impl App {
                 // Buttons row
                 let button_y = current_y;
 
-                // Send button
+                // Send button (themed)
                 let send_style = if focus == 1 {
                     Style::default()
                         .fg(Color::Black)
-                        .bg(Color::Cyan)
+                        .bg(theme.primary)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(theme.dim)
                 };
-                let send_btn = Paragraph::new(" Send ")
+                let send_btn = Paragraph::new(" SEND ")
                     .style(send_style)
                     .alignment(Alignment::Center);
                 frame.render_widget(
@@ -398,16 +461,16 @@ impl App {
                     },
                 );
 
-                // Cancel button
+                // Cancel button (themed)
                 let cancel_style = if focus == 2 {
                     Style::default()
                         .fg(Color::Black)
-                        .bg(Color::Red)
+                        .bg(theme.error)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(theme.dim)
                 };
-                let cancel_btn = Paragraph::new(" Cancel ")
+                let cancel_btn = Paragraph::new(" CANCEL ")
                     .style(cancel_style)
                     .alignment(Alignment::Center);
                 frame.render_widget(
@@ -420,10 +483,10 @@ impl App {
                     },
                 );
 
-                // Help text
-                let help = " [Tab] Navigate  [Enter] Select  [Esc] Cancel ";
-                let help_para = Paragraph::new(help)
-                    .style(Style::default().fg(Color::DarkGray))
+                // Help text (themed) with typewriter effect
+                let help_display = format!(" {} ", help_text.visible_text());
+                let help_para = Paragraph::new(help_display)
+                    .style(Style::default().fg(theme.dim))
                     .alignment(Alignment::Center);
                 frame.render_widget(
                     help_para,
@@ -435,15 +498,16 @@ impl App {
                     },
                 );
 
-                // Position cursor only when input is focused
+                // Position cursor only when input is focused (hidden, we use block cursor)
                 if focus == 0 {
+                    let prompt_len = theme.prompt.chars().count() as u16;
                     let input_y = if context_hint.is_some() {
                         inner.y + 1
                     } else {
                         inner.y
                     };
                     frame.set_cursor_position(Position {
-                        x: inner.x + 2 + cursor_pos as u16,
+                        x: inner.x + 1 + prompt_len + cursor_pos as u16,
                         y: input_y,
                     });
                 }
@@ -538,7 +602,7 @@ impl App {
     }
 
     /// Run the select (menu) mode
-    pub fn run_select(&mut self, items: &[SelectItem]) -> Result<AppResult> {
+    pub fn run_select(&mut self, items: &[SelectItem], animations: bool) -> Result<AppResult> {
         if items.is_empty() {
             return Ok(AppResult::Cancel);
         }
@@ -546,7 +610,27 @@ impl App {
         let mut selected = 0;
         let mut filter = String::new();
 
+        // Clone theme for use in closure
+        let theme = self.theme.clone();
+
+        // Initialize effects
+        let mut cursor = BlinkingCursor::new();
+        let mut scanline = Scanline::new(20, 80);
+        scanline.set_enabled(animations);
+        let mut help_text = if animations {
+            TypewriterText::new("[j/k] Navigate  [Enter] Select  [Esc] Abort", 60)
+        } else {
+            TypewriterText::instant("[j/k] Navigate  [Enter] Select  [Esc] Abort")
+        };
+
         loop {
+            // Update effects
+            if animations {
+                cursor.tick();
+                scanline.tick();
+                help_text.tick();
+            }
+
             // Filter items
             let filtered: Vec<(usize, &SelectItem)> = items
                 .iter()
@@ -572,6 +656,7 @@ impl App {
             // Draw UI
             self.terminal.draw(|frame| {
                 let area = frame.area();
+                scanline.set_height(area.height);
 
                 // Dialog size
                 let dialog_width = area.width.min(70);
@@ -586,26 +671,32 @@ impl App {
                 // Clear background
                 frame.render_widget(Clear, dialog_area);
 
-                // Dialog box
+                // Dialog box with themed styling
+                let title = format!("{} SELECT ", theme.title);
                 let block = Block::default()
-                    .title(" opencode - Select ")
-                    .title_style(Style::default().add_modifier(Modifier::BOLD))
+                    .title(title)
+                    .title_style(
+                        Style::default()
+                            .fg(theme.primary)
+                            .add_modifier(Modifier::BOLD),
+                    )
                     .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::Cyan));
+                    .border_type(theme.border_type())
+                    .border_style(Style::default().fg(theme.primary));
 
                 let inner = block.inner(dialog_area);
                 frame.render_widget(block, dialog_area);
 
-                // Filter input
+                // Filter input (themed)
                 let filter_prompt = Span::styled(
-                    "/ ",
+                    theme.filter_prompt.as_str(),
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(theme.warning)
                         .add_modifier(Modifier::BOLD),
                 );
-                let filter_text = Span::styled(&filter, Style::default().fg(Color::White));
-                let filter_line = Line::from(vec![filter_prompt, filter_text]);
+                let filter_text = Span::styled(&filter, Style::default().fg(theme.input));
+                let cursor_span = Span::styled(cursor.char(), Style::default().fg(theme.primary));
+                let filter_line = Line::from(vec![filter_prompt, filter_text, cursor_span]);
 
                 let filter_para = Paragraph::new(filter_line);
                 frame.render_widget(
@@ -631,16 +722,21 @@ impl App {
                         break;
                     }
 
-                    let style = if i == selected {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD)
+                    let (style, prefix) = if i == selected {
+                        (
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(theme.primary)
+                                .add_modifier(Modifier::BOLD),
+                            theme.selected_prefix.as_str(),
+                        )
                     } else {
-                        Style::default().fg(Color::White)
+                        (
+                            Style::default().fg(theme.text),
+                            theme.unselected_prefix.as_str(),
+                        )
                     };
 
-                    let prefix = if i == selected { "> " } else { "  " };
                     let text = format!("{}{:<12} {}", prefix, item.name, item.description);
                     let para = Paragraph::new(text).style(style);
 
@@ -655,10 +751,10 @@ impl App {
                     );
                 }
 
-                // Help text
-                let help = " [j/k] Navigate  [Enter] Select  [Esc] Cancel  [/] Filter ";
-                let help_para = Paragraph::new(help)
-                    .style(Style::default().fg(Color::DarkGray))
+                // Help text (themed) with typewriter effect
+                let help_display = format!(" {} ", help_text.visible_text());
+                let help_para = Paragraph::new(help_display)
+                    .style(Style::default().fg(theme.dim))
                     .alignment(Alignment::Center);
                 frame.render_widget(
                     help_para,
@@ -669,6 +765,22 @@ impl App {
                         height: 1,
                     },
                 );
+
+                // Scanline effect
+                let scanline_y = dialog_area.y + (scanline.position() % dialog_area.height);
+                if scanline_y >= dialog_area.y && scanline_y < dialog_area.y + dialog_area.height {
+                    let scanline_widget =
+                        Paragraph::new("").style(Style::default().bg(Color::Rgb(0, 40, 0)));
+                    frame.render_widget(
+                        scanline_widget,
+                        Rect {
+                            x: dialog_area.x,
+                            y: scanline_y,
+                            width: dialog_area.width,
+                            height: 1,
+                        },
+                    );
+                }
             })?;
 
             // Handle input from /dev/tty

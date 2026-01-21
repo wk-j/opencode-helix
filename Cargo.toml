@@ -45,6 +45,9 @@ uuid = { version = "1", features = ["v4"] }
 sysinfo = "0.32"
 libc = "0.2.180"
 
+# Clipboard support
+arboard = "3"
+
 [profile.release]
 lto = true
 strip = true

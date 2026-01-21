@@ -5,6 +5,14 @@
 use crate::cli::Cli;
 use std::fs;
 
+/// Get clipboard text content
+fn get_clipboard_text() -> Option<String> {
+    arboard::Clipboard::new()
+        .ok()
+        .and_then(|mut c| c.get_text().ok())
+        .filter(|s| !s.is_empty())
+}
+
 /// Editor context captured from Helix
 #[derive(Debug, Clone, Default)]
 pub struct Context {
@@ -171,6 +179,13 @@ impl Context {
             }
         }
 
+        // Replace @clipboard
+        if result.contains("@clipboard") {
+            if let Some(clipboard) = get_clipboard_text() {
+                result = result.replace("@clipboard", &clipboard);
+            }
+        }
+
         result
     }
 
@@ -231,6 +246,20 @@ impl Context {
             "(no git diff)".to_string()
         };
         placeholders.push(("@diff", diff_value));
+
+        // @clipboard - system clipboard content
+        let clipboard_value = if let Some(clip) = get_clipboard_text() {
+            let preview = if clip.len() > 50 {
+                format!("{}...", &clip[..50])
+            } else {
+                clip.clone()
+            };
+            let lines = clip.lines().count();
+            format!("{} lines: {}", lines, preview.replace('\n', "\\n"))
+        } else {
+            "(empty)".to_string()
+        };
+        placeholders.push(("@clipboard", clipboard_value));
 
         placeholders
     }

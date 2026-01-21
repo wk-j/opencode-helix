@@ -20,6 +20,32 @@ use crate::tui::theme::{Theme, ThemeKind};
 
 const DEBUG_LOG_PATH: &str = "/tmp/opencode-helix-debug.log";
 
+/// Find the @word being typed at cursor position
+/// Returns (start_position, partial_word) if cursor is within or right after an @word
+fn find_at_word(input: &str, cursor_pos: usize) -> Option<(usize, &str)> {
+    // Look backwards from cursor to find @
+    let before_cursor = &input[..cursor_pos];
+    let at_pos = before_cursor.rfind('@')?;
+
+    // Check there's no space between @ and cursor
+    let partial = &input[at_pos..cursor_pos];
+    if partial.contains(' ') {
+        return None;
+    }
+
+    Some((at_pos, partial))
+}
+
+/// Filter placeholders that match the partial input
+fn filter_placeholders<'a>(partial: &str, placeholders: &[&'a str]) -> Vec<&'a str> {
+    let partial_lower = partial.to_lowercase();
+    placeholders
+        .iter()
+        .filter(|p| p.to_lowercase().starts_with(&partial_lower))
+        .copied()
+        .collect()
+}
+
 /// Write debug info to log file if debug mode is enabled
 fn debug_log(debug: bool, msg: &str) {
     if debug {
@@ -246,10 +272,17 @@ impl App {
         // Focus: 0 = input, 1 = Send button, 2 = Cancel button
         let mut focus: u8 = 0;
 
+        // Autocomplete state
+        let mut autocomplete_active = false;
+        let mut autocomplete_selected: usize = 0;
+
         // Get placeholders if context is available
         let placeholders = context
             .map(|ctx| ctx.list_placeholders())
             .unwrap_or_default();
+
+        // Available placeholder names for autocomplete
+        let placeholder_names: Vec<&str> = placeholders.iter().map(|(name, _)| *name).collect();
 
         // Clone theme for use in closure
         let theme = self.theme.clone();
@@ -259,9 +292,12 @@ impl App {
         let mut scanline = Scanline::new(20, 80);
         scanline.set_enabled(animations);
         let mut help_text = if animations {
-            TypewriterText::new("[Tab] Navigate  [Enter] Execute  [Esc] Abort", 60)
+            TypewriterText::new(
+                "[Tab] Navigate  [Alt+V] Paste  [Enter] Execute  [Esc] Abort",
+                60,
+            )
         } else {
-            TypewriterText::instant("[Tab] Navigate  [Enter] Execute  [Esc] Abort")
+            TypewriterText::instant("[Tab] Navigate  [Alt+V] Paste  [Enter] Execute  [Esc] Abort")
         };
 
         loop {
@@ -374,6 +410,7 @@ impl App {
                 let display_input = Line::from(vec![prompt, input_text, cursor_span]);
 
                 let input_para = Paragraph::new(display_input);
+                let input_y = current_y;
                 frame.render_widget(
                     input_para,
                     Rect {
@@ -498,25 +535,159 @@ impl App {
                     },
                 );
 
+                // Autocomplete popup (rendered last to appear on top)
+                let filtered_completions: Vec<&str> =
+                    if let Some((_, partial)) = find_at_word(&input, cursor_pos) {
+                        if autocomplete_active {
+                            filter_placeholders(partial, &placeholder_names)
+                        } else {
+                            vec![]
+                        }
+                    } else {
+                        vec![]
+                    };
+
+                if !filtered_completions.is_empty() {
+                    let popup_width = 16u16;
+                    let popup_height = (filtered_completions.len() as u16 + 2).min(8); // +2 for border
+                    let prompt_len = theme.prompt.chars().count() as u16;
+
+                    // Position popup below the @ symbol
+                    let at_pos = find_at_word(&input, cursor_pos)
+                        .map(|(p, _)| p)
+                        .unwrap_or(0);
+                    let popup_x = (inner.x + 1 + prompt_len + at_pos as u16)
+                        .min(area.width.saturating_sub(popup_width + 1));
+                    let popup_y = input_y + 1;
+
+                    let popup_area = Rect {
+                        x: popup_x,
+                        y: popup_y,
+                        width: popup_width,
+                        height: popup_height,
+                    };
+
+                    // Clear and draw popup background
+                    frame.render_widget(Clear, popup_area);
+                    let popup_block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(ratatui::widgets::BorderType::Rounded)
+                        .border_style(Style::default().fg(theme.secondary));
+                    let popup_inner = popup_block.inner(popup_area);
+                    frame.render_widget(popup_block, popup_area);
+
+                    // Draw completion items
+                    for (i, completion) in filtered_completions.iter().enumerate() {
+                        if i >= popup_inner.height as usize {
+                            break;
+                        }
+                        let style = if i == autocomplete_selected {
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(theme.primary)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(theme.text)
+                        };
+                        let item = Paragraph::new(*completion).style(style);
+                        frame.render_widget(
+                            item,
+                            Rect {
+                                x: popup_inner.x,
+                                y: popup_inner.y + i as u16,
+                                width: popup_inner.width,
+                                height: 1,
+                            },
+                        );
+                    }
+                }
+
                 // Position cursor only when input is focused (hidden, we use block cursor)
                 if focus == 0 {
                     let prompt_len = theme.prompt.chars().count() as u16;
-                    let input_y = if context_hint.is_some() {
+                    let cursor_y = if context_hint.is_some() {
                         inner.y + 1
                     } else {
                         inner.y
                     };
                     frame.set_cursor_position(Position {
                         x: inner.x + 1 + prompt_len + cursor_pos as u16,
-                        y: input_y,
+                        y: cursor_y,
                     });
                 }
             })?;
 
+            // Check if autocomplete should be shown
+            let current_completions: Vec<&str> =
+                if let Some((_, partial)) = find_at_word(&input, cursor_pos) {
+                    filter_placeholders(partial, &placeholder_names)
+                } else {
+                    vec![]
+                };
+
+            // Update autocomplete state
+            if !current_completions.is_empty() && focus == 0 {
+                autocomplete_active = true;
+                // Clamp selection to valid range
+                if autocomplete_selected >= current_completions.len() {
+                    autocomplete_selected = 0;
+                }
+            } else {
+                autocomplete_active = false;
+                autocomplete_selected = 0;
+            }
+
             // Handle input from /dev/tty
             if let Some(key) = self.read_key(Duration::from_millis(100))? {
+                // Handle autocomplete navigation first
+                if autocomplete_active && !current_completions.is_empty() {
+                    match key.code {
+                        KeyCode::Down | KeyCode::Char('n')
+                            if key.code == KeyCode::Down
+                                || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            autocomplete_selected =
+                                (autocomplete_selected + 1) % current_completions.len();
+                            continue;
+                        }
+                        KeyCode::Up | KeyCode::Char('p')
+                            if key.code == KeyCode::Up
+                                || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            autocomplete_selected = if autocomplete_selected == 0 {
+                                current_completions.len() - 1
+                            } else {
+                                autocomplete_selected - 1
+                            };
+                            continue;
+                        }
+                        KeyCode::Tab | KeyCode::Enter => {
+                            // Accept completion
+                            if let Some((at_pos, _)) = find_at_word(&input, cursor_pos) {
+                                let completion = current_completions[autocomplete_selected];
+                                // Replace the partial @word with the full completion
+                                input.replace_range(at_pos..cursor_pos, completion);
+                                cursor_pos = at_pos + completion.len();
+                                // Add a space after completion
+                                input.insert(cursor_pos, ' ');
+                                cursor_pos += 1;
+                                autocomplete_active = false;
+                                autocomplete_selected = 0;
+                            }
+                            continue;
+                        }
+                        KeyCode::Esc => {
+                            // Cancel autocomplete but don't exit dialog
+                            autocomplete_active = false;
+                            autocomplete_selected = 0;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+
                 match key.code {
-                    KeyCode::Tab => {
+                    KeyCode::Tab if !autocomplete_active => {
                         // Cycle focus: input -> Send -> Cancel -> input
                         focus = (focus + 1) % 3;
                     }
@@ -618,9 +789,9 @@ impl App {
         let mut scanline = Scanline::new(20, 80);
         scanline.set_enabled(animations);
         let mut help_text = if animations {
-            TypewriterText::new("[j/k] Navigate  [Enter] Select  [Esc] Abort", 60)
+            TypewriterText::new("[Tab] Navigate  [Enter] Execute  [Esc] Abort", 60)
         } else {
-            TypewriterText::instant("[j/k] Navigate  [Enter] Select  [Esc] Abort")
+            TypewriterText::instant("[Tab] Navigate  [Enter] Execute  [Esc] Abort")
         };
 
         loop {

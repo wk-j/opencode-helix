@@ -12,10 +12,10 @@ use ratatui::{
 use std::fs::File;
 use std::io::Read;
 use std::os::unix::io::AsRawFd;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::context::Context;
-use crate::tui::effects::{BlinkingCursor, Scanline, TypewriterText};
+
 use crate::tui::theme::{Theme, ThemeKind};
 
 const DEBUG_LOG_PATH: &str = "/tmp/opencode-helix-debug.log";
@@ -483,28 +483,22 @@ impl App {
         // Clone theme for use in closure
         let theme = self.theme.clone();
 
-        // Initialize effects
-        let mut cursor = BlinkingCursor::new();
-        let mut scanline = Scanline::new(20, 80);
-        scanline.set_enabled(animations);
-        let mut help_text = if animations {
-            TypewriterText::new("[Tab] Focus  [Enter] Send  [Esc] Abort", 60)
-        } else {
-            TypewriterText::instant("[Tab] Focus  [Enter] Send  [Esc] Abort")
-        };
+        let mut cursor_visible = true;
+        let mut cursor_timer = Instant::now();
+
+        // Help text (static)
+        let help_text = "[Tab] Focus  [Enter] Send  [Esc] Abort";
 
         loop {
-            // Update effects
-            if animations {
-                cursor.tick();
-                scanline.tick();
-                help_text.tick();
+            // Update cursor blink
+            if cursor_timer.elapsed() >= Duration::from_millis(530) {
+                cursor_visible = !cursor_visible;
+                cursor_timer = Instant::now();
             }
 
             // Draw UI
             self.terminal.draw(|frame| {
                 let area = frame.area();
-                scanline.set_height(area.height);
 
                 // Dialog size - always include space for placeholders if we have them
                 let has_placeholders = !placeholders.is_empty();
@@ -544,30 +538,6 @@ impl App {
 
                 let inner = block.inner(dialog_area);
                 frame.render_widget(block, dialog_area);
-
-                // Scanline effect - render a subtle bright line
-                if scanline
-                    .is_scanline_row(dialog_area.y + (scanline.position() % dialog_area.height))
-                {
-                    let scanline_y = dialog_area.y + (scanline.position() % dialog_area.height);
-                    if scanline_y >= dialog_area.y
-                        && scanline_y < dialog_area.y + dialog_area.height
-                    {
-                        // Render scanline as a dim horizontal line overlay
-                        let scanline_widget = Paragraph::new("").style(
-                            Style::default().bg(Color::Rgb(0, 40, 0)), // Very subtle green tint
-                        );
-                        frame.render_widget(
-                            scanline_widget,
-                            Rect {
-                                x: dialog_area.x,
-                                y: scanline_y,
-                                width: dialog_area.width,
-                                height: 1,
-                            },
-                        );
-                    }
-                }
 
                 // Context hint (if any)
                 let mut current_y = inner.y;
@@ -639,8 +609,9 @@ impl App {
                         let text_span = Span::styled(&wline.text, style);
 
                         if is_cursor_line && focus == 0 {
+                            let cursor_char = if cursor_visible { "█" } else { " " };
                             let cursor_span =
-                                Span::styled(cursor.char(), Style::default().fg(theme.primary));
+                                Span::styled(cursor_char, Style::default().fg(theme.primary));
                             Line::from(vec![prefix_span, text_span, cursor_span])
                         } else {
                             Line::from(vec![prefix_span, text_span])
@@ -784,8 +755,8 @@ impl App {
                     },
                 );
 
-                // Help text (themed) with typewriter effect
-                let help_display = format!(" {} ", help_text.visible_text());
+                // Help text (themed)
+                let help_display = format!(" {} ", help_text);
                 let help_para = Paragraph::new(help_display)
                     .style(Style::default().fg(theme.dim))
                     .alignment(Alignment::Center);
@@ -901,7 +872,7 @@ impl App {
             }
 
             // Handle input from /dev/tty
-            if let Some(key) = self.read_key(Duration::from_millis(100))? {
+            if let Some(key) = self.read_key(Duration::from_millis(16))? {
                 // Handle autocomplete navigation first
                 if autocomplete_active && !current_completions.is_empty() {
                     match key.code {
@@ -1130,22 +1101,17 @@ impl App {
         // Clone theme for use in closure
         let theme = self.theme.clone();
 
-        // Initialize effects
-        let mut cursor = BlinkingCursor::new();
-        let mut scanline = Scanline::new(20, 80);
-        scanline.set_enabled(animations);
-        let mut help_text = if animations {
-            TypewriterText::new("[Tab] Navigate  [Enter] Execute  [Esc] Abort", 60)
-        } else {
-            TypewriterText::instant("[Tab] Navigate  [Enter] Execute  [Esc] Abort")
-        };
+        let mut cursor_visible = true;
+        let mut cursor_timer = Instant::now();
+
+        // Help text (static)
+        let help_text = "[Tab] Navigate  [Enter] Execute  [Esc] Abort";
 
         loop {
-            // Update effects
-            if animations {
-                cursor.tick();
-                scanline.tick();
-                help_text.tick();
+            // Update cursor blink
+            if cursor_timer.elapsed() >= Duration::from_millis(530) {
+                cursor_visible = !cursor_visible;
+                cursor_timer = Instant::now();
             }
 
             // Filter items
@@ -1173,7 +1139,6 @@ impl App {
             // Draw UI
             self.terminal.draw(|frame| {
                 let area = frame.area();
-                scanline.set_height(area.height);
 
                 // Dialog size
                 let dialog_width = area.width.min(70);
@@ -1212,7 +1177,8 @@ impl App {
                         .add_modifier(Modifier::BOLD),
                 );
                 let filter_text = Span::styled(&filter, Style::default().fg(theme.input));
-                let cursor_span = Span::styled(cursor.char(), Style::default().fg(theme.primary));
+                let cursor_char = if cursor_visible { "█" } else { " " };
+                let cursor_span = Span::styled(cursor_char, Style::default().fg(theme.primary));
                 let filter_line = Line::from(vec![filter_prompt, filter_text, cursor_span]);
 
                 let filter_para = Paragraph::new(filter_line);
@@ -1268,8 +1234,8 @@ impl App {
                     );
                 }
 
-                // Help text (themed) with typewriter effect
-                let help_display = format!(" {} ", help_text.visible_text());
+                // Help text (themed)
+                let help_display = format!(" {} ", help_text);
                 let help_para = Paragraph::new(help_display)
                     .style(Style::default().fg(theme.dim))
                     .alignment(Alignment::Center);
@@ -1282,26 +1248,10 @@ impl App {
                         height: 1,
                     },
                 );
-
-                // Scanline effect
-                let scanline_y = dialog_area.y + (scanline.position() % dialog_area.height);
-                if scanline_y >= dialog_area.y && scanline_y < dialog_area.y + dialog_area.height {
-                    let scanline_widget =
-                        Paragraph::new("").style(Style::default().bg(Color::Rgb(0, 40, 0)));
-                    frame.render_widget(
-                        scanline_widget,
-                        Rect {
-                            x: dialog_area.x,
-                            y: scanline_y,
-                            width: dialog_area.width,
-                            height: 1,
-                        },
-                    );
-                }
             })?;
 
             // Handle input from /dev/tty
-            if let Some(key) = self.read_key(Duration::from_millis(100))? {
+            if let Some(key) = self.read_key(Duration::from_millis(16))? {
                 match key.code {
                     KeyCode::Enter => {
                         if let Some((_, item)) = filtered.get(selected) {

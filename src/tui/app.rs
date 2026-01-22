@@ -488,12 +488,9 @@ impl App {
         let mut scanline = Scanline::new(20, 80);
         scanline.set_enabled(animations);
         let mut help_text = if animations {
-            TypewriterText::new(
-                "[Tab] Focus  [Enter] Newline  [Ctrl+Enter] Send  [Esc] Abort",
-                60,
-            )
+            TypewriterText::new("[Tab] Focus  [Enter] Send  [Esc] Abort", 60)
         } else {
-            TypewriterText::instant("[Tab] Focus  [Enter] Newline  [Ctrl+Enter] Send  [Esc] Abort")
+            TypewriterText::instant("[Tab] Focus  [Enter] Send  [Esc] Abort")
         };
 
         loop {
@@ -961,34 +958,14 @@ impl App {
                         // Reverse cycle
                         focus = if focus == 0 { 2 } else { focus - 1 };
                     }
-                    // Ctrl+Enter or Ctrl+J to submit (multi-line support)
-                    KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if !input.is_empty() {
-                            return Ok(AppResult::Submit(input));
-                        }
-                    }
-                    KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        // Ctrl+J as alternative submit
-                        if focus == 0 && !input.is_empty() {
-                            return Ok(AppResult::Submit(input));
-                        }
-                    }
+                    // Enter to submit (text auto-wraps visually, no manual newlines needed)
                     KeyCode::Enter => {
                         match focus {
                             0 => {
-                                // Insert newline in input field (multi-line)
-                                input.insert(cursor_pos, '\n');
-                                cursor_pos += 1;
-                                // Update scroll to keep cursor visible (using visual lines)
-                                let prefix_len = theme.prompt.chars().count();
-                                update_scroll_for_cursor(
-                                    &input,
-                                    cursor_pos,
-                                    &mut scroll_offset,
-                                    input_visible_lines as usize,
-                                    last_text_width,
-                                    prefix_len,
-                                );
+                                // Submit from input field
+                                if !input.is_empty() {
+                                    return Ok(AppResult::Submit(input));
+                                }
                             }
                             1 => {
                                 // Send button

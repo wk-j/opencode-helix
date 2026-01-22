@@ -46,6 +46,197 @@ fn filter_placeholders<'a>(partial: &str, placeholders: &[&'a str]) -> Vec<&'a s
         .collect()
 }
 
+/// Multi-line input helper: convert flat cursor position to (line, column)
+fn cursor_to_line_col(text: &str, pos: usize) -> (usize, usize) {
+    let mut line = 0;
+    let mut col = 0;
+    for (i, c) in text.char_indices() {
+        if i >= pos {
+            break;
+        }
+        if c == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+/// Multi-line input helper: convert (line, column) to flat cursor position
+fn line_col_to_cursor(text: &str, target_line: usize, target_col: usize) -> usize {
+    let mut current_line = 0;
+    let mut line_start = 0;
+
+    for (i, c) in text.char_indices() {
+        if current_line == target_line {
+            // We're on the target line, find the column
+            let line_end = text[i..].find('\n').map(|p| i + p).unwrap_or(text.len());
+            let line_len = line_end - i;
+            return i + target_col.min(line_len);
+        }
+        if c == '\n' {
+            current_line += 1;
+            line_start = i + 1;
+        }
+    }
+
+    // If target_line is beyond the last line, return end of text
+    if current_line == target_line {
+        let line_len = text.len() - line_start;
+        return line_start + target_col.min(line_len);
+    }
+    text.len()
+}
+
+/// Get the length of a specific line (without newline)
+fn get_line_length(text: &str, line_idx: usize) -> usize {
+    text.lines().nth(line_idx).map(|l| l.len()).unwrap_or(0)
+}
+
+/// Count the number of lines in text
+fn count_lines(text: &str) -> usize {
+    if text.is_empty() {
+        1
+    } else {
+        text.lines().count() + if text.ends_with('\n') { 1 } else { 0 }
+    }
+}
+
+/// Represents a visual line after soft wrapping
+#[derive(Debug, Clone)]
+struct WrappedLine {
+    /// The text content of this visual line
+    text: String,
+    /// The logical line index this belongs to
+    logical_line: usize,
+    /// Whether this is the first visual line of the logical line
+    is_first: bool,
+    /// Start position in the original text (byte offset)
+    start_pos: usize,
+}
+
+/// Wrap text to fit within a given width, respecting logical line breaks
+fn wrap_text(text: &str, width: usize, prefix_width: usize) -> Vec<WrappedLine> {
+    let mut wrapped = Vec::new();
+    let mut byte_offset = 0;
+
+    for (logical_line, line) in text.split('\n').enumerate() {
+        if line.is_empty() {
+            // Empty line
+            wrapped.push(WrappedLine {
+                text: String::new(),
+                logical_line,
+                is_first: true,
+                start_pos: byte_offset,
+            });
+        } else {
+            // Calculate effective width (first line has prompt, others have indent)
+            let effective_width = width.saturating_sub(prefix_width);
+            if effective_width == 0 {
+                // Fallback if width is too small
+                wrapped.push(WrappedLine {
+                    text: line.to_string(),
+                    logical_line,
+                    is_first: true,
+                    start_pos: byte_offset,
+                });
+            } else {
+                let mut remaining = line;
+                let mut is_first = true;
+                let mut line_byte_offset = byte_offset;
+
+                while !remaining.is_empty() {
+                    // Find break point
+                    let break_at = if remaining.chars().count() <= effective_width {
+                        remaining.len()
+                    } else {
+                        // Find the byte position for the character at effective_width
+                        remaining
+                            .char_indices()
+                            .nth(effective_width)
+                            .map(|(i, _)| i)
+                            .unwrap_or(remaining.len())
+                    };
+
+                    let (chunk, rest) = remaining.split_at(break_at);
+                    wrapped.push(WrappedLine {
+                        text: chunk.to_string(),
+                        logical_line,
+                        is_first,
+                        start_pos: line_byte_offset,
+                    });
+                    line_byte_offset += chunk.len();
+                    remaining = rest;
+                    is_first = false;
+                }
+            }
+        }
+        byte_offset += line.len() + 1; // +1 for newline
+    }
+
+    if wrapped.is_empty() {
+        wrapped.push(WrappedLine {
+            text: String::new(),
+            logical_line: 0,
+            is_first: true,
+            start_pos: 0,
+        });
+    }
+
+    wrapped
+}
+
+/// Find the visual row and column for a cursor position in wrapped text
+fn cursor_to_visual_pos(
+    text: &str,
+    cursor_pos: usize,
+    width: usize,
+    prefix_width: usize,
+) -> (usize, usize) {
+    let wrapped = wrap_text(text, width, prefix_width);
+    let mut visual_row = 0;
+
+    for (i, wline) in wrapped.iter().enumerate() {
+        let line_end = wline.start_pos + wline.text.len();
+        // Check if cursor is in this wrapped line
+        if cursor_pos >= wline.start_pos && cursor_pos <= line_end {
+            let col_in_line = cursor_pos - wline.start_pos;
+            return (i, col_in_line);
+        }
+        visual_row = i;
+    }
+
+    // Cursor is at the end
+    (
+        visual_row,
+        wrapped.last().map(|l| l.text.len()).unwrap_or(0),
+    )
+}
+
+/// Count total visual lines after wrapping
+fn count_visual_lines(text: &str, width: usize, prefix_width: usize) -> usize {
+    wrap_text(text, width, prefix_width).len()
+}
+
+/// Update scroll offset to keep cursor visible (using visual lines with wrapping)
+fn update_scroll_for_cursor(
+    text: &str,
+    cursor_pos: usize,
+    scroll_offset: &mut usize,
+    visible_lines: usize,
+    text_width: usize,
+    prefix_width: usize,
+) {
+    let (visual_row, _) = cursor_to_visual_pos(text, cursor_pos, text_width, prefix_width);
+    if visual_row < *scroll_offset {
+        *scroll_offset = visual_row;
+    } else if visual_row >= *scroll_offset + visible_lines {
+        *scroll_offset = visual_row - visible_lines + 1;
+    }
+}
+
 /// Write debug info to log file if debug mode is enabled
 fn debug_log(debug: bool, msg: &str) {
     if debug {
@@ -272,6 +463,11 @@ impl App {
         // Focus: 0 = input, 1 = Send button, 2 = Cancel button
         let mut focus: u8 = 0;
 
+        // Multi-line input state
+        let input_visible_lines: u16 = 5; // Number of visible lines in input area
+        let mut scroll_offset: usize = 0; // First visible line
+        let mut last_text_width: usize = 60; // Track text width for scroll calculations
+
         // Autocomplete state
         let mut autocomplete_active = false;
         let mut autocomplete_selected: usize = 0;
@@ -293,11 +489,11 @@ impl App {
         scanline.set_enabled(animations);
         let mut help_text = if animations {
             TypewriterText::new(
-                "[Tab] Navigate  [Alt+V] Paste  [Enter] Execute  [Esc] Abort",
+                "[Tab] Focus  [Enter] Newline  [Ctrl+Enter] Send  [Esc] Abort",
                 60,
             )
         } else {
-            TypewriterText::instant("[Tab] Navigate  [Alt+V] Paste  [Enter] Execute  [Esc] Abort")
+            TypewriterText::instant("[Tab] Focus  [Enter] Newline  [Ctrl+Enter] Send  [Esc] Abort")
         };
 
         loop {
@@ -318,12 +514,14 @@ impl App {
                 let dialog_width = if has_placeholders {
                     area.width.min(80)
                 } else {
-                    area.width.min(60)
+                    area.width.min(70)
                 };
+                // Base height: hint(1) + input area(5) + gap(1) + buttons(1) + help(1) + borders(2) = 11
+                // With placeholders: add title(1) + placeholder lines + gap(1)
                 let dialog_height = if has_placeholders {
-                    10 + placeholders.len() as u16
+                    13 + input_visible_lines + placeholders.len() as u16
                 } else {
-                    8
+                    9 + input_visible_lines
                 };
                 let dialog_area = Rect {
                     x: (area.width - dialog_width) / 2,
@@ -390,37 +588,106 @@ impl App {
                     current_y += 1;
                 }
 
-                // Input field
+                // Input field (multi-line with soft wrap)
                 let input_style = if focus == 0 {
                     Style::default().fg(theme.input)
                 } else {
                     Style::default().fg(theme.dim)
                 };
 
-                let prompt = Span::styled(
-                    theme.prompt.as_str(),
-                    Style::default()
-                        .fg(theme.primary)
-                        .add_modifier(Modifier::BOLD),
-                );
-                let input_text = Span::styled(&input, input_style);
-                // Add blinking cursor character when focused
-                let cursor_char = if focus == 0 { cursor.char() } else { "" };
-                let cursor_span = Span::styled(cursor_char, Style::default().fg(theme.primary));
-                let display_input = Line::from(vec![prompt, input_text, cursor_span]);
+                // Calculate available width for text (minus padding and borders)
+                let prompt_len = theme.prompt.chars().count();
+                let text_width = inner.width.saturating_sub(2) as usize; // -2 for padding
+                last_text_width = text_width; // Save for scroll calculations in key handlers
 
-                let input_para = Paragraph::new(display_input);
+                // Get wrapped lines
+                let wrapped_lines = wrap_text(&input, text_width, prompt_len);
+                let total_visual_lines = wrapped_lines.len();
+
+                // Find cursor visual position
+                let (cursor_visual_row, cursor_visual_col) =
+                    cursor_to_visual_pos(&input, cursor_pos, text_width, prompt_len);
+
+                // Build display lines with scroll
+                let input_lines: Vec<Line> = wrapped_lines
+                    .iter()
+                    .enumerate()
+                    .skip(scroll_offset)
+                    .take(input_visible_lines as usize)
+                    .map(|(visual_idx, wline)| {
+                        let is_cursor_line = visual_idx == cursor_visual_row;
+                        let style = input_style;
+
+                        // Determine prefix: prompt for first line of first logical line,
+                        // continuation marker for wrapped lines, indent for other logical lines
+                        let (prefix, prefix_style) = if wline.logical_line == 0 && wline.is_first {
+                            // First line has prompt
+                            (
+                                theme.prompt.clone(),
+                                Style::default()
+                                    .fg(theme.primary)
+                                    .add_modifier(Modifier::BOLD),
+                            )
+                        } else if !wline.is_first {
+                            // Continuation of wrapped line - use a subtle marker
+                            let cont = format!("{:>width$}", "↪ ", width = prompt_len);
+                            (cont, Style::default().fg(theme.dim))
+                        } else {
+                            // Other logical lines - indent to align
+                            let indent = " ".repeat(prompt_len);
+                            (indent, Style::default().fg(theme.dim))
+                        };
+
+                        let prefix_span = Span::styled(prefix, prefix_style);
+                        let text_span = Span::styled(&wline.text, style);
+
+                        if is_cursor_line && focus == 0 {
+                            let cursor_span =
+                                Span::styled(cursor.char(), Style::default().fg(theme.primary));
+                            Line::from(vec![prefix_span, text_span, cursor_span])
+                        } else {
+                            Line::from(vec![prefix_span, text_span])
+                        }
+                    })
+                    .collect();
+
+                // Show scroll indicator if needed
+                let scroll_indicator = if total_visual_lines > input_visible_lines as usize {
+                    format!(" [{}/{}]", cursor_visual_row + 1, total_visual_lines)
+                } else {
+                    String::new()
+                };
+
+                let input_para = Paragraph::new(input_lines);
                 let input_y = current_y;
+                let input_area_height = input_visible_lines;
                 frame.render_widget(
                     input_para,
                     Rect {
                         x: inner.x + 1, // Padding
                         y: current_y,
                         width: inner.width.saturating_sub(2),
-                        height: 1,
+                        height: input_area_height,
                     },
                 );
-                current_y += 2;
+
+                // Scroll indicator on the right side
+                if !scroll_indicator.is_empty() {
+                    let indicator = Paragraph::new(scroll_indicator)
+                        .style(Style::default().fg(theme.dim))
+                        .alignment(Alignment::Right);
+                    frame.render_widget(
+                        indicator,
+                        Rect {
+                            x: inner.x + 1,
+                            y: current_y + input_area_height - 1,
+                            width: inner.width.saturating_sub(2),
+                            height: 1,
+                        },
+                    );
+                }
+
+                current_y += input_area_height + 1;
 
                 // Placeholders panel (always show when we have placeholders)
                 if !placeholders.is_empty() {
@@ -605,14 +872,13 @@ impl App {
                 // Position cursor only when input is focused (hidden, we use block cursor)
                 if focus == 0 {
                     let prompt_len = theme.prompt.chars().count() as u16;
-                    let cursor_y = if context_hint.is_some() {
-                        inner.y + 1
-                    } else {
-                        inner.y
-                    };
+                    let visible_cursor_row = cursor_visual_row.saturating_sub(scroll_offset);
+                    let cursor_y_pos = input_y + visible_cursor_row as u16;
+                    // Column offset includes prefix width
+                    let col_offset = prompt_len + cursor_visual_col as u16;
                     frame.set_cursor_position(Position {
-                        x: inner.x + 1 + prompt_len + cursor_pos as u16,
-                        y: cursor_y,
+                        x: inner.x + 1 + col_offset,
+                        y: cursor_y_pos,
                     });
                 }
             })?;
@@ -695,13 +961,34 @@ impl App {
                         // Reverse cycle
                         focus = if focus == 0 { 2 } else { focus - 1 };
                     }
+                    // Ctrl+Enter or Ctrl+J to submit (multi-line support)
+                    KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if !input.is_empty() {
+                            return Ok(AppResult::Submit(input));
+                        }
+                    }
+                    KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        // Ctrl+J as alternative submit
+                        if focus == 0 && !input.is_empty() {
+                            return Ok(AppResult::Submit(input));
+                        }
+                    }
                     KeyCode::Enter => {
                         match focus {
                             0 => {
-                                // Submit from input field
-                                if !input.is_empty() {
-                                    return Ok(AppResult::Submit(input));
-                                }
+                                // Insert newline in input field (multi-line)
+                                input.insert(cursor_pos, '\n');
+                                cursor_pos += 1;
+                                // Update scroll to keep cursor visible (using visual lines)
+                                let prefix_len = theme.prompt.chars().count();
+                                update_scroll_for_cursor(
+                                    &input,
+                                    cursor_pos,
+                                    &mut scroll_offset,
+                                    input_visible_lines as usize,
+                                    last_text_width,
+                                    prefix_len,
+                                );
                             }
                             1 => {
                                 // Send button
@@ -722,6 +1009,43 @@ impl App {
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         return Ok(AppResult::Cancel);
                     }
+                    // Up arrow for multi-line navigation
+                    KeyCode::Up if focus == 0 && !autocomplete_active => {
+                        let (cursor_line, cursor_col) = cursor_to_line_col(&input, cursor_pos);
+                        if cursor_line > 0 {
+                            // Move to previous line, same column (or end of line if shorter)
+                            cursor_pos = line_col_to_cursor(&input, cursor_line - 1, cursor_col);
+                            // Update scroll using visual lines
+                            let prefix_len = theme.prompt.chars().count();
+                            update_scroll_for_cursor(
+                                &input,
+                                cursor_pos,
+                                &mut scroll_offset,
+                                input_visible_lines as usize,
+                                last_text_width,
+                                prefix_len,
+                            );
+                        }
+                    }
+                    // Down arrow for multi-line navigation
+                    KeyCode::Down if focus == 0 && !autocomplete_active => {
+                        let (cursor_line, cursor_col) = cursor_to_line_col(&input, cursor_pos);
+                        let total_lines = count_lines(&input);
+                        if cursor_line < total_lines - 1 {
+                            // Move to next line, same column (or end of line if shorter)
+                            cursor_pos = line_col_to_cursor(&input, cursor_line + 1, cursor_col);
+                            // Update scroll using visual lines
+                            let prefix_len = theme.prompt.chars().count();
+                            update_scroll_for_cursor(
+                                &input,
+                                cursor_pos,
+                                &mut scroll_offset,
+                                input_visible_lines as usize,
+                                last_text_width,
+                                prefix_len,
+                            );
+                        }
+                    }
                     // Only handle text input when input field is focused
                     KeyCode::Char(c)
                         if focus == 0
@@ -731,11 +1055,31 @@ impl App {
                     {
                         input.insert(cursor_pos, c);
                         cursor_pos += 1;
+                        // Update scroll (line might wrap)
+                        let prefix_len = theme.prompt.chars().count();
+                        update_scroll_for_cursor(
+                            &input,
+                            cursor_pos,
+                            &mut scroll_offset,
+                            input_visible_lines as usize,
+                            last_text_width,
+                            prefix_len,
+                        );
                     }
                     KeyCode::Backspace if focus == 0 => {
                         if cursor_pos > 0 {
                             input.remove(cursor_pos - 1);
                             cursor_pos -= 1;
+                            // Update scroll using visual lines
+                            let prefix_len = theme.prompt.chars().count();
+                            update_scroll_for_cursor(
+                                &input,
+                                cursor_pos,
+                                &mut scroll_offset,
+                                input_visible_lines as usize,
+                                last_text_width,
+                                prefix_len,
+                            );
                         }
                     }
                     KeyCode::Delete if focus == 0 => {
@@ -746,18 +1090,43 @@ impl App {
                     KeyCode::Left if focus == 0 => {
                         if cursor_pos > 0 {
                             cursor_pos -= 1;
+                            // Update scroll using visual lines
+                            let prefix_len = theme.prompt.chars().count();
+                            update_scroll_for_cursor(
+                                &input,
+                                cursor_pos,
+                                &mut scroll_offset,
+                                input_visible_lines as usize,
+                                last_text_width,
+                                prefix_len,
+                            );
                         }
                     }
                     KeyCode::Right if focus == 0 => {
                         if cursor_pos < input.len() {
                             cursor_pos += 1;
+                            // Update scroll using visual lines
+                            let prefix_len = theme.prompt.chars().count();
+                            update_scroll_for_cursor(
+                                &input,
+                                cursor_pos,
+                                &mut scroll_offset,
+                                input_visible_lines as usize,
+                                last_text_width,
+                                prefix_len,
+                            );
                         }
                     }
                     KeyCode::Home if focus == 0 => {
-                        cursor_pos = 0;
+                        // Move to start of current line
+                        let (cursor_line, _) = cursor_to_line_col(&input, cursor_pos);
+                        cursor_pos = line_col_to_cursor(&input, cursor_line, 0);
                     }
                     KeyCode::End if focus == 0 => {
-                        cursor_pos = input.len();
+                        // Move to end of current line
+                        let (cursor_line, _) = cursor_to_line_col(&input, cursor_pos);
+                        let line_len = get_line_length(&input, cursor_line);
+                        cursor_pos = line_col_to_cursor(&input, cursor_line, line_len);
                     }
                     // Arrow keys for button navigation
                     KeyCode::Left if focus > 0 => {
@@ -1032,5 +1401,147 @@ impl SelectItem {
             value: value.to_string(),
             category: category.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cursor_to_line_col_single_line() {
+        let text = "hello world";
+        assert_eq!(cursor_to_line_col(text, 0), (0, 0));
+        assert_eq!(cursor_to_line_col(text, 5), (0, 5));
+        assert_eq!(cursor_to_line_col(text, 11), (0, 11));
+    }
+
+    #[test]
+    fn test_cursor_to_line_col_multi_line() {
+        let text = "hello\nworld\nfoo";
+        // Line 0: "hello" (positions 0-5, newline at 5)
+        assert_eq!(cursor_to_line_col(text, 0), (0, 0));
+        assert_eq!(cursor_to_line_col(text, 5), (0, 5));
+        // Line 1: "world" (positions 6-11, newline at 11)
+        assert_eq!(cursor_to_line_col(text, 6), (1, 0));
+        assert_eq!(cursor_to_line_col(text, 8), (1, 2));
+        // Line 2: "foo" (positions 12-15)
+        assert_eq!(cursor_to_line_col(text, 12), (2, 0));
+        assert_eq!(cursor_to_line_col(text, 15), (2, 3));
+    }
+
+    #[test]
+    fn test_line_col_to_cursor_single_line() {
+        let text = "hello world";
+        assert_eq!(line_col_to_cursor(text, 0, 0), 0);
+        assert_eq!(line_col_to_cursor(text, 0, 5), 5);
+        assert_eq!(line_col_to_cursor(text, 0, 11), 11);
+        // Clamped to line length
+        assert_eq!(line_col_to_cursor(text, 0, 100), 11);
+    }
+
+    #[test]
+    fn test_line_col_to_cursor_multi_line() {
+        let text = "hello\nworld\nfoo";
+        assert_eq!(line_col_to_cursor(text, 0, 0), 0);
+        assert_eq!(line_col_to_cursor(text, 0, 5), 5);
+        assert_eq!(line_col_to_cursor(text, 1, 0), 6);
+        assert_eq!(line_col_to_cursor(text, 1, 2), 8);
+        assert_eq!(line_col_to_cursor(text, 2, 0), 12);
+        assert_eq!(line_col_to_cursor(text, 2, 3), 15);
+        // Clamped to line length
+        assert_eq!(line_col_to_cursor(text, 1, 100), 11); // "world" is 5 chars, so max is position 11
+    }
+
+    #[test]
+    fn test_get_line_length() {
+        let text = "hello\nworld\nfoo";
+        assert_eq!(get_line_length(text, 0), 5);
+        assert_eq!(get_line_length(text, 1), 5);
+        assert_eq!(get_line_length(text, 2), 3);
+        assert_eq!(get_line_length(text, 3), 0); // non-existent line
+    }
+
+    #[test]
+    fn test_count_lines() {
+        assert_eq!(count_lines(""), 1);
+        assert_eq!(count_lines("hello"), 1);
+        assert_eq!(count_lines("hello\n"), 2);
+        assert_eq!(count_lines("hello\nworld"), 2);
+        assert_eq!(count_lines("hello\nworld\n"), 3);
+        assert_eq!(count_lines("a\nb\nc"), 3);
+    }
+
+    #[test]
+    fn test_find_at_word() {
+        assert_eq!(find_at_word("@this", 5), Some((0, "@this")));
+        assert_eq!(find_at_word("@this", 3), Some((0, "@th")));
+        assert_eq!(find_at_word("hello @this", 11), Some((6, "@this")));
+        assert_eq!(find_at_word("hello @", 7), Some((6, "@")));
+        assert_eq!(find_at_word("hello", 5), None);
+        assert_eq!(find_at_word("@ test", 6), None); // space between @ and cursor
+    }
+
+    #[test]
+    fn test_filter_placeholders() {
+        let placeholders = vec!["@this", "@buffer", "@path", "@selection"];
+        assert_eq!(filter_placeholders("@", &placeholders), placeholders);
+        assert_eq!(filter_placeholders("@t", &placeholders), vec!["@this"]);
+        assert_eq!(filter_placeholders("@b", &placeholders), vec!["@buffer"]);
+        assert_eq!(filter_placeholders("@p", &placeholders), vec!["@path"]);
+        assert_eq!(filter_placeholders("@s", &placeholders), vec!["@selection"]);
+        let empty: Vec<&str> = vec![];
+        assert_eq!(filter_placeholders("@x", &placeholders), empty);
+    }
+
+    #[test]
+    fn test_wrap_text_no_wrap_needed() {
+        let text = "hello";
+        let wrapped = wrap_text(text, 20, 2);
+        assert_eq!(wrapped.len(), 1);
+        assert_eq!(wrapped[0].text, "hello");
+        assert_eq!(wrapped[0].logical_line, 0);
+        assert!(wrapped[0].is_first);
+    }
+
+    #[test]
+    fn test_wrap_text_single_wrap() {
+        let text = "hello world foo bar";
+        let wrapped = wrap_text(text, 12, 2); // effective width = 10
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[0].text, "hello worl");
+        assert!(wrapped[0].is_first);
+        assert_eq!(wrapped[1].text, "d foo bar");
+        assert!(!wrapped[1].is_first);
+    }
+
+    #[test]
+    fn test_wrap_text_with_newlines() {
+        let text = "hello\nworld";
+        let wrapped = wrap_text(text, 20, 2);
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[0].text, "hello");
+        assert_eq!(wrapped[0].logical_line, 0);
+        assert_eq!(wrapped[1].text, "world");
+        assert_eq!(wrapped[1].logical_line, 1);
+    }
+
+    #[test]
+    fn test_cursor_to_visual_pos_no_wrap() {
+        let text = "hello";
+        let (row, col) = cursor_to_visual_pos(text, 3, 20, 2);
+        assert_eq!(row, 0);
+        assert_eq!(col, 3);
+    }
+
+    #[test]
+    fn test_cursor_to_visual_pos_with_wrap() {
+        let text = "hello world foo bar";
+        // With width=12, prefix=2, effective=10, wraps to:
+        // Line 0: "hello worl" (pos 0-10)
+        // Line 1: "d foo bar" (pos 10-19)
+        let (row, col) = cursor_to_visual_pos(text, 12, 12, 2);
+        assert_eq!(row, 1);
+        assert_eq!(col, 2); // "d " = 2 chars into the wrapped line
     }
 }
